@@ -4,11 +4,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from app.catalog import router
 from app.analysis import router as analysis_router
+from app.catalog import router
 from app.config import get_settings
 from app.db import get_db
 from app.ingestion import IngestionError, ingest
+from app.lookup import router as lookup_router
 from app.schemas import IngestBatch
 
 settings = get_settings()
@@ -21,6 +22,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(analysis_router)
+app.include_router(lookup_router)
 
 
 @app.get("/api/v1/health")

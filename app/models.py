@@ -36,6 +36,7 @@ class Product(Base):
     attributes: Mapped[dict] = mapped_column(JSON)
     illustration: Mapped[str] = mapped_column(String(40))
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_url: Mapped[str | None] = mapped_column(String(2048))
 
 
 class Retailer(Base):
@@ -64,6 +65,11 @@ class Offer(Base):
     current_item_paise: Mapped[int | None] = mapped_column(Integer)
     current_shipping_paise: Mapped[int | None] = mapped_column(Integer)
     current_in_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    product_url: Mapped[str | None] = mapped_column(String(2048))
+    channel: Mapped[str] = mapped_column(String(20), default="online", server_default="online")
+    availability: Mapped[str] = mapped_column(
+        String(20), default="unknown", server_default="unknown"
+    )
 
 
 class Observation(Base):

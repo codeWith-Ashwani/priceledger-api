@@ -1,4 +1,5 @@
 from datetime import timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -17,8 +18,7 @@ def approved_sources():
         Source.display_allowed.is_(True),
         (Source.expires_at.is_(None) | (Source.expires_at > now())),
     ]
-    if not get_settings().demo_mode:
-        conditions.append(Source.kind != "demo")
+    conditions.append(Source.kind != "demo")
     return conditions
 
 
@@ -37,6 +37,15 @@ def product_json(product: Product, offers: list[dict]) -> dict:
         "attributes": product.attributes,
         "illustration": product.illustration,
         "is_demo": product.is_demo,
+        "image_url": product.image_url,
+        "best_item_price_paise": min(
+            (
+                offer["item_paise"]
+                for offer in offers
+                if offer["in_stock"] and not offer["stale"] and offer["item_paise"] is not None
+            ),
+            default=None,
+        ),
         "best_price_paise": min(comparable, default=None),
         "retailer_count": len(offers),
     }
@@ -76,6 +85,11 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
                 "observed_at": timestamp,
                 "source_name": source.name,
                 "is_demo": source.kind == "demo",
+                "product_url": offer.product_url,
+                "channel": offer.channel,
+                "availability": offer.availability
+                if source.kind == "public_page"
+                else ("in_stock" if offer.current_in_stock else "out_of_stock"),
             }
         )
     return grouped
@@ -84,8 +98,7 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
 @router.get("/categories")
 def categories(db: Session = Depends(get_db)):
     query = select(Product.category, func.count(Product.id)).group_by(Product.category)
-    if not get_settings().demo_mode:
-        query = query.where(Product.is_demo.is_(False))
+    query = query.where(Product.is_demo.is_(False))
     return [
         {"id": category, "name": category.replace("-", " ").title(), "count": count}
         for category, count in db.execute(query.order_by(Product.category))
@@ -100,15 +113,13 @@ def products(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    conditions = []
-    if not get_settings().demo_mode:
-        conditions.append(Product.is_demo.is_(False))
+    conditions = [Product.is_demo.is_(False)]
     if q.strip():
         pattern = (
             "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         )
         conditions.append(
-            (Product.title.ilike(pattern, escape="\\") | Product.brand.ilike(pattern, escape="\\"))
+            Product.title.ilike(pattern, escape="\\") | Product.brand.ilike(pattern, escape="\\")
         )
     if category:
         conditions.append(Product.category == category)
@@ -129,7 +140,7 @@ def products(
 
 def get_product(db: Session, product_id: str) -> Product:
     product = db.get(Product, product_id)
-    if not product or (product.is_demo and not get_settings().demo_mode):
+    if not product or product.is_demo:
         raise HTTPException(404, "Product not found")
     return product
 
@@ -156,12 +167,15 @@ def detail(product_id: str, db: Session = Depends(get_db)):
 
 @router.get("/products/{product_id}/history")
 def history(
-    product_id: str, days: int = Query(default=90, ge=1, le=3650), db: Session = Depends(get_db)
+    product_id: str,
+    days: int = Query(default=90, ge=1, le=36500),
+    basis: Literal["item", "delivered"] = "delivered",
+    db: Session = Depends(get_db),
 ):
     get_product(db, product_id)
     start = now() - timedelta(days=days)
     rows = db.execute(
-        select(Observation, Offer, Retailer)
+        select(Observation, Offer, Retailer, Source)
         .select_from(Observation)
         .join(Offer, Observation.offer_id == Offer.id)
         .join(Retailer, Offer.retailer_id == Retailer.id)
@@ -175,13 +189,16 @@ def history(
         .order_by(Observation.observed_at)
     )
     series = {}
-    for observation, offer, retailer in rows:
+    for observation, offer, retailer, source in rows:
         if offer.id not in series:
             series[offer.id] = {
                 "offer_id": offer.id,
                 "retailer_id": retailer.id,
                 "name": retailer.name,
                 "color": retailer.color,
+                "channel": offer.channel,
+                "source_name": source.name,
+                "product_url": offer.product_url,
                 "points": [],
             }
         item, shipping = observation.item_paise, observation.shipping_paise
@@ -194,6 +211,9 @@ def history(
             {
                 "at": utc(observation.observed_at),
                 "total_paise": total,
+                "price_paise": (item if observation.in_stock else None)
+                if basis == "item"
+                else total,
                 "item_paise": item,
                 "shipping_paise": shipping,
                 "in_stock": observation.in_stock,
@@ -203,6 +223,7 @@ def history(
         "product_id": product_id,
         "days": days,
         "currency": "INR",
+        "price_basis": basis,
         "series": list(series.values()),
         "max_gap_hours": get_settings().history_gap_hours,
     }

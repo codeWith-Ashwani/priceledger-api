@@ -41,5 +41,4 @@ jobs:
       - run: uv sync --locked
       - run: uv run alembic upgrade head
       - run: uv run alembic check
-      - run: uv run python -m app.seed --demo
       - run: uv run pytest -q tests/test_postgres.py
