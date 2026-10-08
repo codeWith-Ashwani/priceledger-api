@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,11 @@ class Settings(BaseSettings):
     lookup_requests_per_minute: int = 12
     freshness_hours: int = 48
     history_gap_hours: int = 48
+    collection_daily_budget: int = Field(default=500, ge=1, le=1_000_000)
+    collection_active_hours: int = Field(default=6, ge=1, le=48)
+    collection_stable_hours: int = Field(default=24, ge=1, le=168)
+    collection_lease_minutes: int = Field(default=5, ge=1, le=60)
+    collection_cooldown_hours: int = Field(default=6, ge=1, le=48)
 
 
 @lru_cache

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.collection import public_source, record_attempt, reserve_requests, touch_offer, track_offer
 from app.config import get_settings
 from app.db import get_db, now, utc
 from app.ingestion import ingest
@@ -18,6 +19,7 @@ from app.retail import (
     STORES,
     Listing,
     LookupError,
+    Target,
     load_listing,
     search_store,
     store_info,
@@ -58,30 +60,20 @@ def lookup_limit(request: Request):
         queue.append(at)
 
 
-def store_listing(db: Session, listing: Listing) -> str:
+def store_listing(
+    db: Session,
+    listing: Listing,
+    *,
+    commit: bool = True,
+    manage_job: bool = True,
+    started_at=None,
+) -> str:
     target = listing.target
     product_id = f"{target.retailer}:{target.external_id}"
     offer_id = product_id + ":public-page"
     source_id = "public-page:" + target.retailer
     store_name, store_color = store_info(target)
-    source = db.get(Source, source_id)
-    if source is None:
-        source = Source(
-            id=source_id,
-            name=store_name + " product page",
-            kind="public_page",
-            display_allowed=True,
-            history_allowed=True,
-        )
-        db.add(source)
-    if (
-        not source.display_allowed
-        or not source.history_allowed
-        or (source.expires_at and utc(source.expires_at) <= now())
-    ):
-        raise LookupError(
-            "source_disabled", "This source has been disabled. No price was recorded.", 403
-        )
+    public_source(db, target)
     if db.get(Retailer, target.retailer) is None:
         db.add(
             Retailer(
@@ -159,13 +151,20 @@ def store_listing(db: Session, listing: Listing) -> str:
                     item_paise=listing.item_paise,
                     shipping_paise=listing.shipping_paise,
                     in_stock=listing.availability == "in_stock",
+                    evidence_kind="page_check",
                 )
             ],
         ),
         demo_mode=False,
         commit=False,
     )
-    db.commit()
+    if manage_job:
+        track_offer(db, offer, requested=True)
+        record_attempt(db, target, started_at=started_at or observed_at)
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return product_id
 
 
@@ -188,19 +187,27 @@ def lookup_link(db: Session, query: str) -> dict:
             and product
             and not product.is_demo
         ):
+            touch_offer(db, cached)
             return {
                 "kind": "product",
                 "product_id": cached.product_id,
                 "cached": True,
                 "message": "Showing the latest recorded retailer observation.",
             }
-    listing = load_listing(target)
+    reserve_requests(db, target)
+    started_at = now()
     try:
-        product_id = store_listing(db, listing)
-    except IntegrityError:
+        listing = load_listing(target)
+        try:
+            product_id = store_listing(db, listing, started_at=started_at)
+        except IntegrityError:
+            db.rollback()
+            product_id = store_listing(db, listing, started_at=started_at)
+    except LookupError as exc:
         db.rollback()
-        # Another request may have created this same listing; retry against that identity.
-        product_id = store_listing(db, listing)
+        record_attempt(db, target, started_at=started_at, error_code=exc.code)
+        db.commit()
+        raise
     return {
         "kind": "product",
         "product_id": product_id,
@@ -227,8 +234,19 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
                 "Paste a full product URL or enter a brand, model and variant (up to 128 characters).",
                 400,
             )
+        permitted, limited = reserve_stores(db, list(STORES), cost=1)
         with ThreadPoolExecutor(max_workers=3) as pool:
-            stores = list(pool.map(lambda retailer: search_store(retailer, query), STORES))
+            stores = list(pool.map(lambda retailer: search_store(retailer, query), permitted))
+        for store in stores:
+            if store["status"] not in {"ok", "no_matches"}:
+                record_attempt(
+                    db,
+                    Target(store["retailer"], store["search_url"], None),
+                    started_at=now(),
+                    error_code=store["status"],
+                )
+        db.commit()
+        stores.extend(limited.values())
         return {
             "kind": "search",
             "query": query,
@@ -238,3 +256,22 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
     except LookupError as exc:
         db.rollback()
         raise HTTPException(exc.status, detail={"code": exc.code, "message": exc.message}) from exc
+
+
+def reserve_stores(db: Session, retailers: list[str], *, cost: int) -> tuple[list[str], dict]:
+    permitted, limited = [], {}
+    for retailer in retailers:
+        try:
+            reserve_requests(db, Target(retailer, STORES[retailer][2], None), cost)
+            permitted.append(retailer)
+        except LookupError as exc:
+            db.rollback()
+            limited[retailer] = {
+                "retailer": retailer,
+                "retailer_name": STORES[retailer][0],
+                "status": exc.code,
+                "message": exc.message,
+                "search_url": STORES[retailer][2],
+                "items": [],
+            }
+    return permitted, limited

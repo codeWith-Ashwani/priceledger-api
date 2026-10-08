@@ -42,7 +42,11 @@ Or keep a collector running alongside the API:
 uv run python -m app.worker --interval-minutes 15
 ```
 
-Each pass checks up to ten due listings, oldest first. A retailer refusal or connection failure stops further requests to that retailer in that pass. This initial collector suits a small private pilot; a durable distributed scheduler, per-source backoff and aggregate history queries are later work.
+Each pass claims up to ten due jobs, oldest first (`--max-jobs` accepts 1–100). Jobs and attempts survive process restarts. Recently requested listings become eligible every six hours; listings without demand for seven days use a 24-hour cadence. These are configurable polling intervals, not a promise to capture every price change. Keep the worker running to collect future history.
+
+Workers use five-minute leases, conditional writes and PostgreSQL `SKIP LOCKED` claims. Expired workers cannot append prices; a later worker can reclaim their job. Failures retry with exponential delays from 15 minutes to 24 hours. Refusals/connection failures apply a persisted six-hour source cooldown; changed variants pause for review. The last valid quote remains intact. A paused identity needs operator review before requeuing; there is no public recovery control yet.
+
+A shared database budget limits each source to 500 reserved fetch operations per UTC day by default. URL lookup and collector checks reserve one operation, name searches reserve one per store, and comparisons conservatively reserve three per store (search plus up to two candidate checks). Unused reservations are not refunded; redirects are bounded by the HTTP adapter separately. Cached prices do not consume budget or create observations. This source budget supplements the process-local client limiter.
 
 History starts at the first recorded observation. Launch dates and earlier prices remain unavailable unless actual historical evidence is imported. Missing shipping is never treated as free. Offline prices require dated, exact-variant shop evidence; there is no universal offline-price feed or fabricated percentage estimate.
 
@@ -50,13 +54,14 @@ History starts at the first recorded observation. Launch dates and earlier price
 - `GET /api/v1/products/{id}`: offers, retailer links, online/offline channel, timestamps, price components and coverage.
 - `GET /api/v1/products/{id}/history?days=90&basis=item`: source-labelled timeline; `basis=delivered` requires known shipping. Maximum range is 36,500 days.
 - `GET /api/v1/products/{id}/assessment`: comparable delivered-total reference and coverage.
+- `GET /api/v1/products/{id}/coverage`: aggregate evidence counts/India days, first/latest observations, collection state, last check and next eligible time.
 - `GET /api/v1/categories`: stored categories.
 - `GET /api/v1/health`: service health.
 - `POST /api/v1/ingest`: administrative evidence import, disabled until `PRICELEDGER_ADMIN_TOKEN` is set; requires `X-Admin-Token`. Never expose this secret to the frontend.
 
-Administrative imports require a permitted source, mapped exact offer, matching attributes, INR integer paise, aware timestamp and unique source event ID. Identical repeated events are idempotent; conflicting reuse is rejected. Backfills preserve newer current prices.
+Administrative imports require a permitted source, mapped exact offer belonging to that source, matching attributes, INR integer paise, aware timestamp and unique source event ID. Identical repeated events are idempotent; conflicting reuse is rejected. Backfills preserve newer current prices. `evidence_kind` accepts `recorded` (default), `page_check` or `historical_import`; it labels evidence and does not validate a provider's claim. New observations retain their submitted variant attributes. Public-page checks also retain seller/condition/region/availability at that check; older records retain an unknown snapshot rather than inventing past identity. Provider-to-offer mapping across independent sources remains a later integration.
 
-Assessments use the median of daily delivered totals over 30 days ending seven days ago, with at least 20 observed days. Recorded lows cover a stated offer and period. A rise/drop pattern does not prove manipulation. Item-price charts and delivered-total assessments are labelled separately.
+Assessments use India calendar days for the median of daily delivered totals over 30 days ending seven days ago, with at least 20 observed days. Recorded lows cover a stated offer and period. A rise/drop pattern does not prove manipulation. Item-price charts and delivered-total assessments are labelled separately.
 
 Lookup is limited to 12 requests/minute/client in one process. Dedicated-store HTTP access uses an exact host allowlist, public-address checks, validated redirects, bounded timeouts and a 3 MB decoded page limit. Lookup and automatic-comparison quotas are separate. Generic URLs use DNS-pinned HTTPS connections: every resolved address must be public, the connection goes to that checked IP, TLS verifies the original hostname, and each redirect is revalidated. Generic fetches reject credentials, private/reserved addresses, unusual ports and non-product pages, with a 35-second deadline and 3 MB body limit. Shared rate limiting and enforced egress policy remain necessary before running multiple public replicas.
 

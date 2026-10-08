@@ -8,14 +8,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.catalog import get_product
+from app.collection import record_attempt, reserve_requests
 from app.db import get_db, now, utc
 from app.identity import match_variant
-from app.lookup import lookup_limit, store_listing
+from app.lookup import lookup_limit, reserve_stores, store_listing
 from app.models import ComparisonScan, Offer, Product, ProductMatch, Source
 from app.retail import (
     STORES,
     Listing,
     LookupError,
+    Target,
     load_listing,
     search_store,
     store_info,
@@ -46,15 +48,23 @@ def discover_store(retailer: str, query: str) -> dict:
     result = search_store(retailer, query)
     candidates = []
     failures = []
+    failed_checks = []
     # Bounded verification: read at most two exact search candidates from each store.
     for item in result["items"][:2]:
+        started_at = now()
         try:
             candidates.append(load_listing(target_for(item["url"])))
         except LookupError as exc:
             failures.append(exc.message)
+            failed_checks.append({"url": item["url"], "code": exc.code, "at": started_at})
             if exc.code == "retailer_blocked":
                 break
-    return {"search": result, "listings": candidates, "failures": failures}
+    return {
+        "search": result,
+        "listings": candidates,
+        "failures": failures,
+        "failed_checks": failed_checks,
+    }
 
 
 def scan_comparison(db: Session, product_id: str) -> dict:
@@ -92,6 +102,7 @@ def scan_comparison(db: Session, product_id: str) -> dict:
     # Enrich old records with newly available variant metadata from the same listing.
     if "identity_category" not in anchor.attributes and "phone" in anchor.title.lower():
         try:
+            reserve_requests(db, anchor.target)
             anchor = load_listing(anchor.target)
             store_listing(db, anchor)
         except LookupError:
@@ -103,12 +114,32 @@ def scan_comparison(db: Session, product_id: str) -> dict:
             query += " " + str(anchor.attributes[key])
     query = query[:128]
     retailers = [retailer for retailer in STORES if retailer != anchor.target.retailer]
+    # Reserve one search and up to two page reads per store before parallel discovery.
+    permitted, limited = reserve_stores(db, retailers, cost=3)
     with ThreadPoolExecutor(max_workers=3) as pool:
-        discovered = list(pool.map(lambda retailer: discover_store(retailer, query), retailers))
+        discoveries = list(pool.map(lambda retailer: discover_store(retailer, query), permitted))
+    by_store = dict(zip(permitted, discoveries, strict=True))
+    discovered = [
+        by_store.get(retailer)
+        or {"search": limited[retailer], "listings": [], "failures": [limited[retailer]["message"]]}
+        for retailer in retailers
+    ]
     stores = []
     source_ids = {offer.source_id}
     for retailer, discovery in zip(retailers, discovered, strict=True):
         search = discovery["search"]
+        if retailer in permitted and search["status"] not in {"ok", "no_matches"}:
+            record_attempt(
+                db,
+                Target(retailer, search["search_url"], None),
+                started_at=now(),
+                error_code=search["status"],
+            )
+        for failed in discovery.get("failed_checks", []):
+            record_attempt(
+                db, target_for(failed["url"]), started_at=failed["at"], error_code=failed["code"]
+            )
+        db.commit()
         items = []
         for candidate in discovery["listings"]:
             decision = match_variant(anchor, candidate)

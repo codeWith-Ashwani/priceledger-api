@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import median
 
 from fastapi import APIRouter, Depends
@@ -18,7 +18,12 @@ def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: da
     daily: dict[str, list[int]] = defaultdict(list)
     for observed_at, amount in points:
         if reference_start <= observed_at < reference_end:
-            daily[observed_at.date().isoformat()].append(amount)
+            daily[
+                utc(observed_at)
+                .astimezone(timezone(timedelta(hours=5, minutes=30)))
+                .date()
+                .isoformat()
+            ].append(amount)
     baseline = (
         round(median([median(values) for values in daily.values()])) if len(daily) >= 20 else None
     )
@@ -56,7 +61,7 @@ def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: da
         "reference_start": reference_start,
         "reference_end": reference_end,
         "method": "Median of daily observed delivered prices over 30 days ending 7 days ago",
-        "algorithm_version": "daily-median-v1",
+        "algorithm_version": "daily-median-v2-ist",
         "history_window_days": 365,
     }
 

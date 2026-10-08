@@ -50,9 +50,10 @@ def ingest(
         offer = offers.get(record.offer_id)
         if not offer or offer.source_id != source.id:
             raise IngestionError("Offer does not belong to the approved source")
-        if record.variant_attributes != products[offer.product_id].attributes:
-            raise IngestionError("Exact variant attributes do not match")
         canonical = record.model_dump(mode="json")
+        # Preserve fingerprints of batches accepted before evidence labels were added.
+        if record.evidence_kind == "recorded":
+            canonical.pop("evidence_kind")
         canonical["observed_at"] = utc(record.observed_at).isoformat()
         fingerprint = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
         previous = existing.get(record.external_event_id)
@@ -63,6 +64,8 @@ def ingest(
                 raise IngestionError("Event ID was reused with different data", 409)
             duplicates += 1
             continue
+        if record.variant_attributes != products[offer.product_id].attributes:
+            raise IngestionError("Exact variant attributes do not match")
         pending[record.external_event_id] = (record, fingerprint, offer)
 
     try:
@@ -80,6 +83,18 @@ def ingest(
                     mrp_paise=record.mrp_paise,
                     in_stock=record.in_stock,
                     currency=record.currency,
+                    evidence_kind=record.evidence_kind,
+                    variant_snapshot=dict(record.variant_attributes),
+                    context_snapshot={
+                        "seller": offer.seller,
+                        "condition": offer.condition,
+                        "region": offer.region,
+                        "availability": offer.availability
+                        if source.kind == "public_page"
+                        else ("in_stock" if record.in_stock else "out_of_stock"),
+                    }
+                    if record.evidence_kind == "page_check"
+                    else None,
                 )
             )
             if offer.current_observed_at is None or observed_at > utc(offer.current_observed_at):

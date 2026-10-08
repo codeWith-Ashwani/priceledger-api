@@ -93,6 +93,11 @@ class Observation(Base):
     mrp_paise: Mapped[int | None] = mapped_column(Integer)
     in_stock: Mapped[bool] = mapped_column(Boolean)
     currency: Mapped[str] = mapped_column(String(3), default="INR")
+    variant_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    context_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    evidence_kind: Mapped[str] = mapped_column(
+        String(30), default="recorded", server_default="recorded"
+    )
 
 
 class ProductMatch(Base):
@@ -109,3 +114,39 @@ class ComparisonScan(Base):
     product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
     result: Mapped[dict] = mapped_column(JSON)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CollectionJob(Base):
+    __tablename__ = "collection_jobs"
+    __table_args__ = (Index("ix_collection_jobs_due", "status", "next_run_at"),)
+    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(60))
+
+
+class CollectionAttempt(Base):
+    __tablename__ = "collection_attempts"
+    __table_args__ = (Index("ix_collection_attempts_offer_time", "offer_id", "started_at"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    offer_id: Mapped[str | None] = mapped_column(ForeignKey("offers.id"))
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"))
+    product_url: Mapped[str] = mapped_column(String(2048))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str] = mapped_column(String(20), default="running")
+    error_code: Mapped[str | None] = mapped_column(String(60))
+
+
+class CollectionBudget(Base):
+    __tablename__ = "collection_budgets"
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), primary_key=True)
+    budget_day: Mapped[str] = mapped_column(String(10))
+    reserved_requests: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

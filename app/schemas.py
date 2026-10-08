@@ -16,6 +16,7 @@ class ObservationInput(BaseModel):
     mrp_paise: int | None = Field(default=None, ge=0, le=2_000_000_000)
     in_stock: bool
     currency: Literal["INR"] = "INR"
+    evidence_kind: Literal["recorded", "page_check", "historical_import"] = "recorded"
 
     @model_validator(mode="after")
     def validate_context(self):

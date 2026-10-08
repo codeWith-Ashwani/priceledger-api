@@ -2,13 +2,22 @@ from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import Date, case, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db, now, utc
 from app.groups import member_ids
-from app.models import Observation, Offer, Product, Retailer, Source
+from app.models import (
+    CollectionAttempt,
+    CollectionBudget,
+    CollectionJob,
+    Observation,
+    Offer,
+    Product,
+    Retailer,
+    Source,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -197,6 +206,22 @@ def history(
         .order_by(Observation.observed_at)
     )
     series = {}
+    failures: dict[str, list] = {}
+    for offer_id, failed_at in db.execute(
+        select(CollectionAttempt.offer_id, CollectionAttempt.started_at)
+        .join(Offer, CollectionAttempt.offer_id == Offer.id)
+        .join(Source, CollectionAttempt.source_id == Source.id)
+        .where(
+            Offer.product_id.in_(member_ids(db, product_id)),
+            CollectionAttempt.outcome == "failure",
+            CollectionAttempt.started_at >= start,
+            *approved_sources(),
+        )
+        .order_by(CollectionAttempt.started_at)
+    ):
+        failures.setdefault(offer_id, []).append(utc(failed_at))
+    last_observed: dict[str, object] = {}
+    failure_index: dict[str, int] = {}
     for observation, offer, retailer, source in rows:
         if offer.id not in series:
             series[offer.id] = {
@@ -206,6 +231,7 @@ def history(
                 "color": retailer.color,
                 "channel": offer.channel,
                 "source_name": source.name,
+                "source_id": source.id,
                 "product_url": offer.product_url,
                 "points": [],
             }
@@ -215,9 +241,24 @@ def history(
             if observation.in_stock and item is not None and shipping is not None
             else None
         )
+        timestamp = utc(observation.observed_at)
+        failed_checks = failures.get(offer.id, [])
+        index = failure_index.get(offer.id, 0)
+        gap_before = False
+        while index < len(failed_checks) and failed_checks[index] <= timestamp:
+            if offer.id in last_observed and failed_checks[index] > last_observed[offer.id]:
+                gap_before = True
+            index += 1
+        failure_index[offer.id] = index
+        last_observed[offer.id] = timestamp
         series[offer.id]["points"].append(
             {
-                "at": utc(observation.observed_at),
+                "at": timestamp,
+                "observation_id": observation.id,
+                "evidence_kind": observation.evidence_kind,
+                "variant_snapshot": observation.variant_snapshot,
+                "context_snapshot": observation.context_snapshot,
+                "gap_before": gap_before,
                 "total_paise": total,
                 "price_paise": (item if observation.in_stock else None)
                 if basis == "item"
@@ -234,4 +275,96 @@ def history(
         "price_basis": basis,
         "series": list(series.values()),
         "max_gap_hours": get_settings().history_gap_hours,
+    }
+
+
+@router.get("/products/{product_id}/coverage")
+def coverage(product_id: str, db: Session = Depends(get_db)):
+    get_product(db, product_id)
+    members = member_ids(db, product_id)
+    # Count observed calendar days in India, without loading every historical quote.
+    day = (
+        cast(func.timezone("Asia/Kolkata", Observation.observed_at), Date)
+        if (db.bind.dialect.name == "postgresql")
+        else func.date(Observation.observed_at, "+5 hours", "+30 minutes")
+    )
+    aggregates = db.execute(
+        select(
+            Observation.offer_id,
+            func.count(Observation.id),
+            func.min(Observation.observed_at),
+            func.max(Observation.observed_at),
+            func.count(func.distinct(day)),
+            func.sum(case((Observation.evidence_kind == "historical_import", 1), else_=0)),
+        )
+        .join(Offer, Observation.offer_id == Offer.id)
+        .join(Source, Observation.source_id == Source.id)
+        .where(Offer.product_id.in_(members), Observation.observed_at <= now(), *approved_sources())
+        .group_by(Observation.offer_id)
+    )
+    counts = {row[0]: row[1:] for row in aggregates}
+    offers = comparison_offers(db, product_id)
+    items = []
+    for offer in offers:
+        count, first, last, days, imported = counts.get(offer["id"], (0, None, None, 0, 0))
+        job = db.get(CollectionJob, offer["id"])
+        record = db.get(Offer, offer["id"])
+        budget = db.get(CollectionBudget, record.source_id)
+        last_check = db.scalar(
+            select(CollectionAttempt)
+            .where(
+                CollectionAttempt.offer_id == offer["id"],
+                CollectionAttempt.outcome != "running",
+            )
+            .order_by(CollectionAttempt.started_at.desc(), CollectionAttempt.id.desc())
+            .limit(1)
+        )
+        eligible = utc(job.next_run_at) if job and job.status == "queued" else None
+        if eligible and budget:
+            if budget.blocked_until:
+                eligible = max(eligible, utc(budget.blocked_until))
+            if budget.budget_day == now().date().isoformat() and (
+                budget.reserved_requests >= get_settings().collection_daily_budget
+            ):
+                eligible = max(
+                    eligible,
+                    now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1),
+                )
+        items.append(
+            {
+                "offer_id": offer["id"],
+                "retailer_name": offer["retailer_name"],
+                "source_name": offer["source_name"],
+                "channel": offer["channel"],
+                "observations": count,
+                "observed_days": days,
+                "first_observed_at": utc(first) if first else None,
+                "latest_observed_at": utc(last) if last else None,
+                "imported_observations": imported,
+                "collection_status": "awaiting_retry"
+                if job
+                and job.status == "running"
+                and job.lease_expires_at
+                and utc(job.lease_expires_at) <= now()
+                else job.status
+                if job
+                else "not_scheduled",
+                "next_eligible_check_at": eligible,
+                "consecutive_failures": job.consecutive_failures if job else 0,
+                "last_error_code": job.last_error_code if job else None,
+                "last_check": {
+                    "outcome": last_check.outcome,
+                    "error_code": last_check.error_code,
+                    "at": utc(last_check.completed_at or last_check.started_at),
+                }
+                if last_check
+                else None,
+            }
+        )
+    return {
+        "product_id": product_id,
+        "timezone": "Asia/Kolkata",
+        "stores": items,
+        "launch_history_verified": False,
+        "history_note": "Coverage describes recorded evidence, not every day since launch. Older imports require a verified source; no historical provider is connected.",
     }
