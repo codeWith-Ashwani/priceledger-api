@@ -207,8 +207,10 @@ def history(
     )
     series = {}
     failures: dict[str, list] = {}
-    for offer_id, failed_at in db.execute(
-        select(CollectionAttempt.offer_id, CollectionAttempt.started_at)
+    for offer_id, source_id, failed_at in db.execute(
+        select(
+            CollectionAttempt.offer_id, CollectionAttempt.source_id, CollectionAttempt.started_at
+        )
         .join(Offer, CollectionAttempt.offer_id == Offer.id)
         .join(Source, CollectionAttempt.source_id == Source.id)
         .where(
@@ -219,12 +221,14 @@ def history(
         )
         .order_by(CollectionAttempt.started_at)
     ):
-        failures.setdefault(offer_id, []).append(utc(failed_at))
+        failures.setdefault((offer_id, source_id), []).append(utc(failed_at))
     last_observed: dict[str, object] = {}
     failure_index: dict[str, int] = {}
     for observation, offer, retailer, source in rows:
-        if offer.id not in series:
-            series[offer.id] = {
+        key = (offer.id, source.id, observation.price_type)
+        if key not in series:
+            series[key] = {
+                "series_id": ":".join(key),
                 "offer_id": offer.id,
                 "retailer_id": retailer.id,
                 "name": retailer.name,
@@ -232,6 +236,7 @@ def history(
                 "channel": offer.channel,
                 "source_name": source.name,
                 "source_id": source.id,
+                "price_type": observation.price_type,
                 "product_url": offer.product_url,
                 "points": [],
             }
@@ -242,22 +247,24 @@ def history(
             else None
         )
         timestamp = utc(observation.observed_at)
-        failed_checks = failures.get(offer.id, [])
-        index = failure_index.get(offer.id, 0)
+        failed_checks = failures.get((offer.id, source.id), [])
+        index = failure_index.get(key, 0)
         gap_before = False
         while index < len(failed_checks) and failed_checks[index] <= timestamp:
-            if offer.id in last_observed and failed_checks[index] > last_observed[offer.id]:
+            if key in last_observed and failed_checks[index] > last_observed[key]:
                 gap_before = True
             index += 1
-        failure_index[offer.id] = index
-        last_observed[offer.id] = timestamp
-        series[offer.id]["points"].append(
+        failure_index[key] = index
+        last_observed[key] = timestamp
+        series[key]["points"].append(
             {
                 "at": timestamp,
                 "observation_id": observation.id,
                 "evidence_kind": observation.evidence_kind,
                 "variant_snapshot": observation.variant_snapshot,
                 "context_snapshot": observation.context_snapshot,
+                "evidence_reference": observation.evidence_reference,
+                "import_id": observation.import_id,
                 "gap_before": gap_before,
                 "total_paise": total,
                 "price_paise": (item if observation.in_stock else None)
@@ -303,12 +310,39 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
         .group_by(Observation.offer_id)
     )
     counts = {row[0]: row[1:] for row in aggregates}
+    history_sources: dict[str, list] = {}
+    for offer_id, source_id, source_name, count in db.execute(
+        select(Observation.offer_id, Source.id, Source.name, func.count(Observation.id))
+        .join(Offer, Observation.offer_id == Offer.id)
+        .join(Source, Observation.source_id == Source.id)
+        .where(Offer.product_id.in_(members), Observation.observed_at <= now(), *approved_sources())
+        .group_by(Observation.offer_id, Source.id, Source.name)
+    ):
+        history_sources.setdefault(offer_id, []).append(
+            {"source_id": source_id, "name": source_name, "observations": count}
+        )
     offers = comparison_offers(db, product_id)
+    included = {offer["id"] for offer in offers}
+    for offer, retailer in db.execute(
+        select(Offer, Retailer)
+        .join(Retailer)
+        .where(Offer.product_id.in_(members), Offer.id.in_(counts), Offer.id.not_in(included))
+    ):
+        offers.append(
+            {
+                "id": offer.id,
+                "retailer_name": retailer.name,
+                "source_name": "Approved historical evidence",
+                "channel": offer.channel,
+            }
+        )
     items = []
     for offer in offers:
         count, first, last, days, imported = counts.get(offer["id"], (0, None, None, 0, 0))
         job = db.get(CollectionJob, offer["id"])
         record = db.get(Offer, offer["id"])
+        if offer["id"] not in included:
+            job = None
         budget = db.get(CollectionBudget, record.source_id)
         last_check = db.scalar(
             select(CollectionAttempt)
@@ -341,6 +375,7 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
                 "first_observed_at": utc(first) if first else None,
                 "latest_observed_at": utc(last) if last else None,
                 "imported_observations": imported,
+                "history_sources": history_sources.get(offer["id"], []),
                 "collection_status": "awaiting_retry"
                 if job
                 and job.status == "running"
@@ -366,5 +401,5 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
         "timezone": "Asia/Kolkata",
         "stores": items,
         "launch_history_verified": False,
-        "history_note": "Coverage describes recorded evidence, not every day since launch. Older imports require a verified source; no historical provider is connected.",
+        "history_note": "Coverage describes recorded evidence, not every day since launch. Approved file imports supplement our checks; no automatic historical provider is connected.",
     }

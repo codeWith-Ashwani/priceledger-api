@@ -137,9 +137,9 @@ def test_postgres_exclusive_claims_and_atomic_budget(monkeypatch):
         first_job = locked.scalar(
             select(CollectionJob)
             .where(CollectionJob.offer_id.like("flipkart:MOBPGCLAIM%"))
-                .order_by(CollectionJob.offer_id)
-                .limit(1)
-                .with_for_update()
+            .order_by(CollectionJob.offer_id)
+            .limit(1)
+            .with_for_update()
         )
         with SessionLocal() as other:
             claim2 = claim_job(other)
@@ -176,3 +176,104 @@ def test_postgres_exclusive_claims_and_atomic_budget(monkeypatch):
         result = client.get("/api/v1/products/flipkart:MOBPGCLAIM1/coverage")
         assert result.status_code == 200
         assert result.json()["stores"][0]["observed_days"] == 1
+
+
+def test_postgres_history_imports_are_atomic_and_replayable(monkeypatch):
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sqlalchemy import func, select
+
+    from app.models import HistoryImport, Observation, Offer, Product, SourceOfferMapping
+
+    monkeypatch.setattr(get_settings(), "admin_token", "pg-import-test-only")
+    with SessionLocal() as db:
+        offer = db.get(Offer, "flipkart:MOBPGTEST128:public-page")
+        product = db.get(Product, offer.product_id)
+        row = {
+            "offer_id": offer.id,
+            "retailer_id": offer.retailer_id,
+            "retailer_listing_id": offer.external_id,
+            "external_event_id": "pg-archive-price",
+            "observed_at": (now() - timedelta(days=60)).isoformat(),
+            "variant_attributes": product.attributes,
+            "seller": offer.seller,
+            "condition": offer.condition,
+            "region": offer.region,
+            "item_paise": 4900000,
+            "shipping_paise": 0,
+            "in_stock": True,
+            "evidence_reference": "PostgreSQL isolated historical contract",
+        }
+        original_price = offer.current_item_paise
+    headers = {"X-Admin-Token": "pg-import-test-only"}
+    with TestClient(app) as client:
+        client.headers.update(headers)
+        assert (
+            client.post(
+                "/api/v1/admin/sources",
+                json={
+                    "id": "pg-archive",
+                    "name": "PostgreSQL archive contract",
+                    "approval_reference": "Isolated integration contract",
+                    "rights_confirmed": True,
+                },
+            ).status_code
+            == 201
+        )
+        draft_ids = []
+        for _ in range(2):
+            preview = client.post(
+                "/api/v1/admin/imports/preview",
+                json={
+                    "source_id": "pg-archive",
+                    "file_name": "pg-export.json",
+                    "format": "json",
+                    "content": json.dumps([row]),
+                },
+            )
+            assert preview.status_code == 200 and preview.json()["can_commit"]
+            draft_ids.append(preview.json()["import_id"])
+
+    # Two independent previews race to import the same event; one adds it, one skips it.
+    def save(draft_id):
+        with TestClient(app) as client:
+            response = client.post(f"/api/v1/admin/imports/{draft_id}/commit", headers=headers)
+            assert response.status_code == 200, response.text
+            return response.json()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(save, draft_ids))
+    assert sum(result["inserted"] for result in results) == 1
+    assert sum(result["duplicates"] for result in results) == 1
+    with SessionLocal() as db:
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(Observation)
+                .where(Observation.source_id == "pg-archive")
+            )
+            == 1
+        )
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(SourceOfferMapping)
+                .where(SourceOfferMapping.source_id == "pg-archive")
+            )
+            == 1
+        )
+        assert db.get(Offer, row["offer_id"]).current_item_paise == original_price
+        assert all(db.get(HistoryImport, id).status == "committed" for id in draft_ids)
+    with TestClient(app) as client:
+        assert client.post(f"/api/v1/admin/imports/{draft_ids[0]}/commit", headers=headers).json()[
+            "replayed"
+        ]
+        history = client.get(
+            "/api/v1/products/flipkart:MOBPGTEST128/history?days=365&basis=item"
+        ).json()
+        assert any(
+            series["source_id"] == "pg-archive" and series["points"][0]["import_id"]
+            for series in history["series"]
+        )
+        assert len(client.get("/api/v1/products/flipkart:MOBPGTEST128").json()["offers"]) == 2

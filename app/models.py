@@ -24,6 +24,7 @@ class Source(Base):
     history_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     display_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approval_reference: Mapped[str | None] = mapped_column(String(1000))
 
 
 class Product(Base):
@@ -98,6 +99,9 @@ class Observation(Base):
     evidence_kind: Mapped[str] = mapped_column(
         String(30), default="recorded", server_default="recorded"
     )
+    import_id: Mapped[str | None] = mapped_column(ForeignKey("history_imports.id"))
+    evidence_reference: Mapped[str | None] = mapped_column(String(1000))
+    price_type: Mapped[str] = mapped_column(String(30), default="listing", server_default="listing")
 
 
 class ProductMatch(Base):
@@ -150,3 +154,30 @@ class CollectionBudget(Base):
     budget_day: Mapped[str] = mapped_column(String(10))
     reserved_requests: Mapped[int] = mapped_column(Integer, default=0)
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class HistoryImport(Base):
+    __tablename__ = "history_imports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"))
+    file_name: Mapped[str] = mapped_column(String(150))
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    mapping_digest: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[list] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="ready")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict | None] = mapped_column(JSON)
+
+
+class SourceOfferMapping(Base):
+    __tablename__ = "source_offer_mappings"
+    __table_args__ = (UniqueConstraint("source_id", "retailer_id", "retailer_listing_id"),)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), primary_key=True)
+    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"), primary_key=True)
+    retailer_id: Mapped[str] = mapped_column(ForeignKey("retailers.id"))
+    retailer_listing_id: Mapped[str] = mapped_column(String(150))
+    variant_snapshot: Mapped[dict] = mapped_column(JSON)
+    context_snapshot: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

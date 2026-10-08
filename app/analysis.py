@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.catalog import approved_sources, comparison_offers, get_product
 from app.db import get_db, now, utc
-from app.models import Observation, Source
+from app.models import Observation, Offer, Source
 
 router = APIRouter(prefix="/api/v1")
 
@@ -61,7 +61,7 @@ def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: da
         "reference_start": reference_start,
         "reference_end": reference_end,
         "method": "Median of daily observed delivered prices over 30 days ending 7 days ago",
-        "algorithm_version": "daily-median-v2-ist",
+        "algorithm_version": "daily-median-v3-source-ist",
         "history_window_days": 365,
     }
 
@@ -92,22 +92,53 @@ def assessment(product_id: str, db: Session = Depends(get_db)):
                 .order_by(Observation.observed_at)
             )
         )
+        tracked = db.get(Offer, best["id"])
+        latest = next(
+            (
+                observation
+                for observation in reversed(observations)
+                if observation.source_id == tracked.source_id
+                and tracked.current_observed_at
+                and utc(observation.observed_at) == utc(tracked.current_observed_at)
+            ),
+            None,
+        )
+        # Select one evidence source per India day: own observations take priority,
+        # then a deterministic approved archive. Overlapping feeds cannot overweight a day.
+        by_day: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
         for observation in observations:
+            if observation.price_type != "listing":
+                continue
+            if observation.evidence_kind == "historical_import" and (
+                not observation.context_snapshot
+                or any(
+                    observation.context_snapshot.get(key) != getattr(tracked, key)
+                    for key in ("seller", "condition", "region")
+                )
+            ):
+                continue
             if (
                 observation.in_stock
                 and observation.item_paise is not None
                 and observation.shipping_paise is not None
             ):
-                points.append(
-                    (
-                        utc(observation.observed_at),
-                        observation.item_paise + observation.shipping_paise,
-                    )
+                timestamp = utc(observation.observed_at)
+                day = (
+                    timestamp.astimezone(timezone(timedelta(hours=5, minutes=30)))
+                    .date()
+                    .isoformat()
                 )
-        latest = observations[-1] if observations else None
+                by_day[day][observation.source_id].append(
+                    (timestamp, observation.item_paise + observation.shipping_paise)
+                )
+        points = []
+        for evidence in by_day.values():
+            chosen = tracked.source_id if tracked.source_id in evidence else min(evidence)
+            points.extend(evidence[chosen])
     result = assess(points, best["total_paise"] if best else None, now())
     result.update(
         {
+            "history_source_policy": "One source per India day: own checks first, otherwise approved source ID order",
             "offer_id": best["id"] if best else None,
             "retailer_name": best["retailer_name"] if best else None,
             "is_demo": best["is_demo"] if best else False,
