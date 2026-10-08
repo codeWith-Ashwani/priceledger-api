@@ -10,8 +10,15 @@ from app.schemas import IngestBatch, ObservationInput
 
 
 def record(event_id="event-1", **overrides):
-    values = dict(offer_id="offer-128", external_event_id=event_id, observed_at=now(),
-                  variant_attributes={"storage_gb": 128}, item_paise=9_000, shipping_paise=500, in_stock=True)
+    values = dict(
+        offer_id="offer-128",
+        external_event_id=event_id,
+        observed_at=now(),
+        variant_attributes={"storage_gb": 128},
+        item_paise=9_000,
+        shipping_paise=500,
+        in_stock=True,
+    )
     values.update(overrides)
     return ObservationInput(**values)
 
@@ -65,17 +72,28 @@ def test_unavailable_observation_is_a_gap_not_zero(client, db):
 
 
 def test_history_window_excludes_old_observations(client, db):
-    ingest(db, batch(record("old", observed_at=now() - timedelta(days=100)), record("new")), demo_mode=True)
+    ingest(
+        db,
+        batch(record("old", observed_at=now() - timedelta(days=100)), record("new")),
+        demo_mode=True,
+    )
     history = client.get("/api/v1/products/phone-128/history", params={"days": 30}).json()
     assert len(history["series"][0]["points"]) == 1
 
 
 def test_admin_ingestion_is_disabled_without_secret(client):
-    assert client.post("/api/v1/ingest", json=batch(record()).model_dump(mode="json")).status_code == 403
+    assert (
+        client.post("/api/v1/ingest", json=batch(record()).model_dump(mode="json")).status_code
+        == 403
+    )
 
 
 def test_negative_naive_and_future_prices_are_rejected():
-    for overrides in ({"item_paise": -1}, {"observed_at": now() + timedelta(hours=1)},
-                      {"observed_at": now().replace(tzinfo=None)}, {"in_stock": True, "item_paise": None}):
+    for overrides in (
+        {"item_paise": -1},
+        {"observed_at": now() + timedelta(hours=1)},
+        {"observed_at": now().replace(tzinfo=None)},
+        {"in_stock": True, "item_paise": None},
+    ):
         with pytest.raises(ValueError):
             record(**overrides)

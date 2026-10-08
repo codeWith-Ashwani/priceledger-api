@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.catalog import router
+from app.analysis import router as analysis_router
 from app.config import get_settings
 from app.db import get_db
 from app.ingestion import IngestionError, ingest
@@ -19,6 +20,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Admin-Token"],
 )
 app.include_router(router)
+app.include_router(analysis_router)
 
 
 @app.get("/api/v1/health")
@@ -27,8 +29,11 @@ def health() -> dict[str, str | bool]:
 
 
 @app.post("/api/v1/ingest")
-def import_observations(batch: IngestBatch, x_admin_token: str | None = Header(default=None),
-                        db: Session = Depends(get_db)):
+def import_observations(
+    batch: IngestBatch,
+    x_admin_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
     if not settings.admin_token:
         raise HTTPException(403, "Administrative ingestion is disabled")
     if not x_admin_token or not hmac.compare_digest(x_admin_token, settings.admin_token):

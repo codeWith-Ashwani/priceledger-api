@@ -19,7 +19,7 @@ Optional configuration is in `.env.example`; copy it to `.env`. Credentials and 
 
 The seed command is optional and creates six fictional product variants and synthetic history across sample retailer labels. It never fetches retailer pages or establishes actual historical prices. Repeating the seed command does not duplicate the fixtures. Set `PRICELEDGER_DEMO_MODE=false` to hide and reject demo data.
 
-For PostgreSQL, set `PRICELEDGER_DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/priceledger` in the local environment, then run migrations. Do not commit credentials. SQLite is the verified local development path; PostgreSQL uses the same SQLAlchemy models and Alembic migrations.
+For PostgreSQL, set `PRICELEDGER_DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/priceledger` in the local environment, then run migrations. Do not commit credentials. SQLite runs without extra local services; GitHub CI exercises PostgreSQL migrations, sample imports, catalog, history and assessment endpoints against a PostgreSQL 17 service.
 
 ## API
 
@@ -27,9 +27,12 @@ For PostgreSQL, set `PRICELEDGER_DATABASE_URL=postgresql+psycopg://USER:PASSWORD
 - `GET /api/v1/products?q=&category=&limit=24&offset=0`: paginated exact variants.
 - `GET /api/v1/products/{id}`: comparable current offers, freshness and history coverage.
 - `GET /api/v1/products/{id}/history?days=90`: timestamped price/stock series with gap policy.
+- `GET /api/v1/products/{id}/assessment`: explainable daily-median reference, coverage and recent rise/drop evidence for the best fresh matching offer.
 - `POST /api/v1/ingest`: administrative batch import; disabled unless `PRICELEDGER_ADMIN_TOKEN` is configured, then requires `X-Admin-Token`. Never expose this secret to frontend code.
 
 Imports require an approved source, its mapped offer, matching variant attributes, INR values in integer paise, an aware observation timestamp and a unique source event ID. Repeated identical events are idempotent; conflicting reuse is rejected. Backfills do not overwrite newer current prices. Shipping uncertainty, unavailable stock and stale prices remain explicit.
+
+Assessments compare the current known delivered total with the median of daily observed delivered totals over 30 days ending seven days ago. At least 20 distinct observed days are required. The recorded low is for the selected offer over up to 365 days, not a claim of an all-time market low. A recent rise followed by a drop is an observed pattern, not proof of manipulation.
 
 ## Verify
 

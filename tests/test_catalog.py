@@ -15,7 +15,12 @@ def test_catalog_paginates_and_respects_exact_variants(client):
 
 def test_search_escapes_wildcards_and_filters_category(client):
     assert client.get("/api/v1/products", params={"q": "%"}).json()["total"] == 0
-    assert client.get("/api/v1/products", params={"q": "test", "category": "electronics"}).json()["total"] == 2
+    assert (
+        client.get("/api/v1/products", params={"q": "test", "category": "electronics"}).json()[
+            "total"
+        ]
+        == 2
+    )
     assert client.get("/api/v1/products", params={"category": "fashion"}).json()["total"] == 0
 
 

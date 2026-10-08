@@ -16,7 +16,9 @@ class IngestionError(ValueError):
         self.status_code = status_code
 
 
-def ingest(db: Session, batch: IngestBatch, *, demo_mode: bool, commit: bool = True) -> dict[str, int]:
+def ingest(
+    db: Session, batch: IngestBatch, *, demo_mode: bool, commit: bool = True
+) -> dict[str, int]:
     source = db.get(Source, batch.source_id)
     if not source or not source.history_allowed or not source.display_allowed:
         raise IngestionError("Source is not approved for display and history", 403)
@@ -27,13 +29,21 @@ def ingest(db: Session, batch: IngestBatch, *, demo_mode: bool, commit: bool = T
 
     offer_ids = {record.offer_id for record in batch.observations}
     offers = {offer.id: offer for offer in db.scalars(select(Offer).where(Offer.id.in_(offer_ids)))}
-    products = {product.id: product for product in db.scalars(select(Product).where(
-        Product.id.in_({offer.product_id for offer in offers.values()})
-    ))}
+    products = {
+        product.id: product
+        for product in db.scalars(
+            select(Product).where(Product.id.in_({offer.product_id for offer in offers.values()}))
+        )
+    }
     event_ids = {record.external_event_id for record in batch.observations}
-    existing = {record.external_event_id: record.fingerprint for record in db.scalars(
-        select(Observation).where(Observation.source_id == source.id, Observation.external_event_id.in_(event_ids))
-    )}
+    existing = {
+        record.external_event_id: record.fingerprint
+        for record in db.scalars(
+            select(Observation).where(
+                Observation.source_id == source.id, Observation.external_event_id.in_(event_ids)
+            )
+        )
+    }
     pending: dict[str, tuple] = {}
     duplicates = 0
     for record in batch.observations:
@@ -58,12 +68,20 @@ def ingest(db: Session, batch: IngestBatch, *, demo_mode: bool, commit: bool = T
     try:
         for record, fingerprint, offer in pending.values():
             observed_at = utc(record.observed_at)
-            db.add(Observation(
-                offer_id=offer.id, source_id=source.id, external_event_id=record.external_event_id,
-                fingerprint=fingerprint, observed_at=observed_at, item_paise=record.item_paise,
-                shipping_paise=record.shipping_paise, mrp_paise=record.mrp_paise,
-                in_stock=record.in_stock, currency=record.currency,
-            ))
+            db.add(
+                Observation(
+                    offer_id=offer.id,
+                    source_id=source.id,
+                    external_event_id=record.external_event_id,
+                    fingerprint=fingerprint,
+                    observed_at=observed_at,
+                    item_paise=record.item_paise,
+                    shipping_paise=record.shipping_paise,
+                    mrp_paise=record.mrp_paise,
+                    in_stock=record.in_stock,
+                    currency=record.currency,
+                )
+            )
             if offer.current_observed_at is None or observed_at > utc(offer.current_observed_at):
                 offer.current_observed_at = observed_at
                 offer.current_item_paise = record.item_paise

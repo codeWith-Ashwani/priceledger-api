@@ -14,3 +14,32 @@ jobs:
       - run: uv sync --locked
       - run: uv run alembic upgrade head
       - run: uv run pytest -q
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: priceledger
+          POSTGRES_PASSWORD: integration-only
+          POSTGRES_DB: priceledger
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U priceledger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PRICELEDGER_DATABASE_URL: postgresql+psycopg://priceledger:integration-only@localhost:5432/priceledger
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run alembic upgrade head
+      - run: uv run alembic check
+      - run: uv run python -m app.seed --demo
+      - run: uv run pytest -q tests/test_postgres.py
