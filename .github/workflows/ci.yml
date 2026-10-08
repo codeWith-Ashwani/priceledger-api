@@ -12,4 +12,5 @@ jobs:
           version: "0.12.6"
           enable-cache: true
       - run: uv sync --locked
+      - run: uv run alembic upgrade head
       - run: uv run pytest -q
