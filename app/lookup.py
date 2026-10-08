@@ -14,7 +14,15 @@ from app.config import get_settings
 from app.db import get_db, now, utc
 from app.ingestion import ingest
 from app.models import Offer, Product, Retailer, Source
-from app.retail import STORES, Listing, LookupError, load_listing, search_store, target_for
+from app.retail import (
+    STORES,
+    Listing,
+    LookupError,
+    load_listing,
+    search_store,
+    store_info,
+    target_for,
+)
 from app.schemas import IngestBatch, ObservationInput
 
 router = APIRouter(prefix="/api/v1")
@@ -27,7 +35,9 @@ class LookupInput(BaseModel):
 
 
 def lookup_limit(request: Request):
-    key = request.client.host if request.client else "local"
+    client = request.client.host if request.client else "local"
+    action = "comparison" if request.url.path.endswith("/compare") else "lookup"
+    key = f"{client}:{action}"
     at = monotonic()
     with _lock:
         # Bounded process-local limiter. Use a shared limiter before deploying replicas.
@@ -53,11 +63,12 @@ def store_listing(db: Session, listing: Listing) -> str:
     product_id = f"{target.retailer}:{target.external_id}"
     offer_id = product_id + ":public-page"
     source_id = "public-page:" + target.retailer
+    store_name, store_color = store_info(target)
     source = db.get(Source, source_id)
     if source is None:
         source = Source(
             id=source_id,
-            name=STORES[target.retailer][0] + " product page",
+            name=store_name + " product page",
             kind="public_page",
             display_allowed=True,
             history_allowed=True,
@@ -75,8 +86,8 @@ def store_listing(db: Session, listing: Listing) -> str:
         db.add(
             Retailer(
                 id=target.retailer,
-                name=STORES[target.retailer][0],
-                color=STORES[target.retailer][1],
+                name=store_name,
+                color=store_color,
             )
         )
     product = db.get(Product, product_id)
@@ -93,13 +104,15 @@ def store_listing(db: Session, listing: Listing) -> str:
             is_demo=False,
         )
         db.add(product)
-    elif product.attributes != listing.attributes:
+    elif any(listing.attributes.get(key) != value for key, value in product.attributes.items()):
         # A changed retailer variant must not silently overwrite the tracked identity.
         raise LookupError(
             "variant_changed",
             "The listing's variant metadata has changed. This observation needs review before it can join the history.",
             409,
         )
+    else:
+        product.attributes = listing.attributes
     db.flush()
     offer = db.get(Offer, offer_id)
     if offer is None:
@@ -118,6 +131,16 @@ def store_listing(db: Session, listing: Listing) -> str:
         )
         db.add(offer)
         db.flush()
+    if (
+        offer.condition != "unknown"
+        and listing.condition != "unknown"
+        and offer.condition != listing.condition
+    ):
+        raise LookupError(
+            "variant_changed",
+            "The listing condition changed; its prices cannot join the previous variant history.",
+            409,
+        )
     offer.availability = listing.availability
     offer.product_url = target.url
     offer.seller = listing.seller

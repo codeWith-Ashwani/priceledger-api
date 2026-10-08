@@ -6,10 +6,14 @@ import re
 import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
+
+from app.identity import mobile_attributes
+from app.public_http import PublicFetchError, fetch_public
 
 STORES = {
     "amazon": ("Amazon", "#a86416", "https://www.amazon.in/s?"),
@@ -68,6 +72,16 @@ class Listing:
     seller: str
 
 
+def retailer_key(host: str) -> str:
+    return HOSTS.get(host, "site-" + sha256(host.removeprefix("www.").encode()).hexdigest()[:12])
+
+
+def store_info(target: Target) -> tuple[str, str]:
+    if target.retailer in STORES:
+        return STORES[target.retailer][:2]
+    return urlsplit(target.url).hostname.removeprefix("www."), "#155c45"
+
+
 def allowed_url(value: str, retailer: str | None = None) -> str:
     try:
         parsed = urlsplit(value)
@@ -76,9 +90,19 @@ def allowed_url(value: str, retailer: str | None = None) -> str:
             or parsed.username
             or parsed.password
             or parsed.port not in {None, 80, 443}
-            or parsed.hostname not in HOSTS
-            or (retailer and HOSTS[parsed.hostname] != retailer)
+            or not parsed.hostname
+            or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", parsed.hostname)
+            or parsed.hostname.endswith(
+                (".test", ".local", ".localhost", ".invalid", ".example", ".internal", ".onion")
+            )
+            or (retailer and retailer_key(parsed.hostname) != retailer)
         ):
+            raise ValueError
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            pass
+        else:
             raise ValueError
         return (
             "https://"
@@ -88,14 +112,18 @@ def allowed_url(value: str, retailer: str | None = None) -> str:
         )
     except ValueError as exc:
         raise LookupError(
-            "invalid_link", "Use an Amazon India, Flipkart or Meesho product link.", 400
+            "invalid_link",
+            "Use a public ecommerce product link with a valid domain and standard HTTPS port.",
+            400,
         ) from exc
 
 
 def target_for(value: str) -> Target:
     url = allowed_url(value)
     parsed = urlsplit(url)
-    retailer = HOSTS[parsed.hostname]
+    retailer = retailer_key(parsed.hostname)
+    if retailer.startswith("site-"):
+        return Target(retailer, url, "url-" + sha256(url.encode()).hexdigest()[:24])
     if parsed.hostname in SHORT_HOSTS:
         return Target(retailer, url, None)
     if retailer == "amazon":
@@ -132,6 +160,14 @@ def check_public_dns(host: str):
 
 def fetch_page(url: str, retailer: str) -> tuple[str, str]:
     """Allowlisted HTTPS only, validated redirects, bounded timeout and decoded body size."""
+    if retailer.startswith("site-"):
+        try:
+            return fetch_public(url, lambda candidate: allowed_url(candidate, retailer))
+        except (PublicFetchError, OSError, ValueError) as exc:
+            raise LookupError(
+                "store_unavailable",
+                "This store could not expose a readable public product page. No price was recorded.",
+            ) from exc
     headers = {
         "User-Agent": "PriceLedger/0.2 (user-requested product lookup; no login)",
         "Accept": "text/html,application/xhtml+xml",
@@ -266,7 +302,18 @@ def parse_listing(html: str, target: Target) -> Listing:
             if price is not None and offers.get("priceCurrency") == "INR":
                 attributes = {
                     key: str(item[key])[:200]
-                    for key in ("model", "color", "size", "mpn", "sku", "gtin13")
+                    for key in (
+                        "model",
+                        "color",
+                        "size",
+                        "mpn",
+                        "sku",
+                        "gtin",
+                        "gtin8",
+                        "gtin12",
+                        "gtin13",
+                        "gtin14",
+                    )
                     if isinstance(item.get(key), (str, int))
                 }
                 title = str(item.get("name", "")).strip()
@@ -284,6 +331,11 @@ def parse_listing(html: str, target: Target) -> Listing:
                 brand = item.get("brand", "")
                 if isinstance(brand, dict):
                     brand = brand.get("name", "")
+                identity_title = title
+                heading = soup.select_one("h1") if target.retailer == "flipkart" else None
+                if heading and title in heading.get_text(" ", strip=True):
+                    identity_title = heading.get_text(" ", strip=True)
+                attributes = mobile_attributes(identity_title, str(brand), attributes)
                 availability = str(offers.get("availability", "")).split("/")[-1]
                 availability = {
                     "InStock": "in_stock",
@@ -381,7 +433,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                 text,
                 brand[:100],
                 "uncategorized",
-                {"listing_title": text, "asin": target.external_id},
+                mobile_attributes(text, brand, {"listing_title": text, "asin": target.external_id}),
                 safe_image(image.get("data-old-hires") or image.get("src")) if image else None,
                 amount,
                 None,
@@ -398,7 +450,11 @@ def parse_listing(html: str, target: Target) -> Listing:
 def load_listing(target: Target) -> Listing:
     html, final_url = fetch_page(target.url, target.retailer)
     resolved = target_for(final_url)
-    if target.external_id and resolved.external_id != target.external_id:
+    if (
+        target.external_id
+        and not target.retailer.startswith("site-")
+        and resolved.external_id != target.external_id
+    ):
         raise LookupError(
             "changed_product",
             "The retailer redirected to a different product. Paste the new product link.",

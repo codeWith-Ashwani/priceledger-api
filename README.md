@@ -20,9 +20,9 @@ Optional settings are in `.env.example`. Copy it to `.env` to configure your loc
 
 `POST /api/v1/lookup` accepts `{"query":"PRODUCT_URL_OR_BRAND_MODEL_VARIANT"}`.
 
-A product URL is checked against Amazon India, Flipkart or Meesho. Full Flipkart links retain `pid` to identify the actual variant and discard tracking parameters. Recognized short links are resolved only through allowlisted retailer hosts. Readable product pages supply actual INR item prices, explicit delivery charges, availability, identity and source. A successful lookup creates a real product and timestamped observation and returns its `product_id`. Recent observations are cached for 15 minutes by default. Link requests never substitute catalog samples.
+Amazon India, Flipkart and Meesho have dedicated URL rules. Other public ecommerce URLs use a generic reader when the page exposes one unambiguous INR Product/Offer in structured data. Full Flipkart links retain `pid` to identify the actual variant and discard tracking parameters. Recognized short links are resolved only through allowlisted retailer hosts. Readable product pages supply actual INR item prices, explicit delivery charges, availability, identity and source. A successful lookup creates a real product and timestamped observation and returns its `product_id`. Recent observations are cached for 15 minutes by default. Link requests never substitute catalog samples.
 
-A brand/model query searches retailer pages concurrently and returns candidate listings and per-retailer status. The user selects the exact colour, size, storage and pack before a price is recorded. Search snippets are not historical price evidence. Similar names are not automatically merged across stores.
+A brand/model query searches retailer pages concurrently and returns candidate listings and per-retailer status. The user selects the exact colour, size, storage and pack before a price is recorded. Search snippets are not historical price evidence. After selecting or pasting a listing, the frontend automatically starts a cross-store comparison. Similar names alone are not enough to merge prices.
 
 Public page access varies. Some pages need JavaScript, refuse automated requests or change markup; blocked or unreadable pages return a specific error and record nothing. The adapter does not log in, solve CAPTCHAs, rotate proxies or guess a price. It reads a single explicit INR offer or Amazon's main price-to-pay, and rejects ambiguous offers, wrong variants and invalid amounts. Tests use controlled contracts, while the local browser checks also exercise the owner's supplied real product URL.
 
@@ -58,7 +58,7 @@ Administrative imports require a permitted source, mapped exact offer, matching 
 
 Assessments use the median of daily delivered totals over 30 days ending seven days ago, with at least 20 observed days. Recorded lows cover a stated offer and period. A rise/drop pattern does not prove manipulation. Item-price charts and delivered-total assessments are labelled separately.
 
-Lookup is limited to 12 requests/minute/client in one process. HTTP access uses an exact host allowlist, public-address checks, validated redirects, bounded timeouts and a 3 MB decoded page limit. Shared rate limiting and enforced egress policy are required before running multiple public replicas.
+Lookup is limited to 12 requests/minute/client in one process. Dedicated-store HTTP access uses an exact host allowlist, public-address checks, validated redirects, bounded timeouts and a 3 MB decoded page limit. Lookup and automatic-comparison quotas are separate. Generic URLs use DNS-pinned HTTPS connections: every resolved address must be public, the connection goes to that checked IP, TLS verifies the original hostname, and each redirect is revalidated. Generic fetches reject credentials, private/reserved addresses, unusual ports and non-product pages, with a 35-second deadline and 3 MB body limit. Shared rate limiting and enforced egress policy remain necessary before running multiple public replicas.
 
 ## Verify
 
@@ -70,3 +70,11 @@ uv run alembic check
 GitHub CI checks unit contracts and PostgreSQL 17 migrations, lookup persistence, backfills and assessment roundtrips without external retailer dependencies.
 
 Frontend: https://github.com/codeWith-Ashwani/priceledger-web. Only README documentation is published; research and sprints remain local. Both repositories remain private until the owner explicitly changes visibility.
+
+## One-link cross-store comparison
+
+`POST /api/v1/products/{id}/compare` searches the other connected retailers automatically and verifies up to two readable candidate listings per retailer. Comparison scans are cached for 15 minutes and serialized in this pilot process to avoid duplicate fan-out. A retailer with no readable match is reported explicitly. Adding more discovery retailers requires their search/feed adapter; accepting a source URL is separate from guaranteeing coverage of every other retailer.
+
+Verified matches create durable comparison links while keeping each retailer's original product attributes, offer and observations intact. Catalog detail, best-price assessment and history then include all verified group members. Matching requires either a valid shared GTIN with consistent brand/condition and no conflicting attributes, or complete matching phone brand/model/RAM/storage/colour/condition. A changed known condition cannot enter a previous variant's history. Missing information requires review; different variants remain excluded. Their genuine prices and links may be displayed separately without entering the exact-product winner or combined graph.
+
+History responses include a separate series for each actual offer, retailer, source and online/offline channel. The frontend additionally renders a paginated observation ledger with date/time, store, item price, delivered total and source. No current page can reconstruct launch-to-today prices. Licensed/public-permitted historical evidence can be backfilled through the administrative ingestion contract; a historical data provider is not yet connected.

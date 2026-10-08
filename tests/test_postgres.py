@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -28,7 +29,7 @@ def test_postgres_lookup_history_and_assessment_roundtrip(monkeypatch):
         "Integration Phone Blue 128 GB",
         "Integration",
         "mobile",
-        {"sku": target.external_id},
+        {"sku": target.external_id, "gtin13": "1234567890128", "identity_category": "mobile"},
         None,
         3699900,
         0,
@@ -73,3 +74,21 @@ def test_postgres_lookup_history_and_assessment_roundtrip(monkeypatch):
         assert assessment["reference_days_observed"] >= 20
         assert assessment["verdict"] == "below_usual"
         assert client.post("/api/v1/lookup", json={"query": target.url}).json()["cached"]
+        other = replace(
+            listing,
+            target=Target("amazon", "https://www.amazon.in/dp/B012345678", "B012345678"),
+            item_paise=3999900,
+        )
+        monkeypatch.setattr(
+            "app.comparison.discover_store",
+            lambda retailer, query: {
+                "search": {"status": "ok", "search_url": "https://www.amazon.in/s?k=test"},
+                "listings": [other] if retailer == "amazon" else [],
+                "failures": [],
+            },
+        )
+        comparison = client.post(f"/api/v1/products/{product_id}/compare")
+        assert comparison.status_code == 200
+        assert comparison.json()["stores"][0]["status"] == "verified"
+        assert len(client.get(f"/api/v1/products/{product_id}").json()["offers"]) == 2
+        assert len(client.get(f"/api/v1/products/{product_id}/history").json()["series"]) == 2

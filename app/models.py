@@ -93,3 +93,19 @@ class Observation(Base):
     mrp_paise: Mapped[int | None] = mapped_column(Integer)
     in_stock: Mapped[bool] = mapped_column(Boolean)
     currency: Mapped[str] = mapped_column(String(3), default="INR")
+
+
+class ProductMatch(Base):
+    __tablename__ = "product_matches"
+    left_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
+    right_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
+    method: Mapped[str] = mapped_column(String(40))
+    evidence: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ComparisonScan(Base):
+    __tablename__ = "comparison_scans"
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
+    result: Mapped[dict] = mapped_column(JSON)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

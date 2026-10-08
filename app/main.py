@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis import router as analysis_router
 from app.catalog import router
+from app.comparison import router as comparison_router
 from app.config import get_settings
 from app.db import get_db
 from app.ingestion import IngestionError, ingest
@@ -23,6 +24,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(analysis_router)
 app.include_router(lookup_router)
+app.include_router(comparison_router)
 
 
 @app.get("/api/v1/health")

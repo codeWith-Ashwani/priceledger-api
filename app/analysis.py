@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.catalog import approved_sources, get_product, offers_for
+from app.catalog import approved_sources, comparison_offers, get_product
 from app.db import get_db, now, utc
 from app.models import Observation, Source
 
@@ -64,7 +64,7 @@ def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: da
 @router.get("/products/{product_id}/assessment")
 def assessment(product_id: str, db: Session = Depends(get_db)):
     get_product(db, product_id)
-    offers = offers_for(db, [product_id])[product_id]
+    offers = comparison_offers(db, product_id)
     eligible = [
         offer
         for offer in offers

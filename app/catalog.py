@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db, now, utc
+from app.groups import member_ids
 from app.models import Observation, Offer, Product, Retailer, Source
 
 router = APIRouter(prefix="/api/v1")
@@ -145,16 +146,23 @@ def get_product(db: Session, product_id: str) -> Product:
     return product
 
 
+def comparison_offers(db: Session, product_id: str) -> list[dict]:
+    members = member_ids(db, product_id)
+    grouped = offers_for(db, members)
+    return [offer for member in members for offer in grouped[member]]
+
+
 @router.get("/products/{product_id}")
 def detail(product_id: str, db: Session = Depends(get_db)):
     product = get_product(db, product_id)
-    offers = offers_for(db, [product_id])[product_id]
+    members = member_ids(db, product_id)
+    offers = comparison_offers(db, product_id)
     first_seen = db.scalar(
         select(func.min(Observation.observed_at))
         .select_from(Observation)
         .join(Offer, Observation.offer_id == Offer.id)
         .join(Source, Observation.source_id == Source.id)
-        .where(Offer.product_id == product_id, *approved_sources())
+        .where(Offer.product_id.in_(members), *approved_sources())
     )
     return {
         **product_json(product, offers),
@@ -181,7 +189,7 @@ def history(
         .join(Retailer, Offer.retailer_id == Retailer.id)
         .join(Source, Observation.source_id == Source.id)
         .where(
-            Offer.product_id == product_id,
+            Offer.product_id.in_(member_ids(db, product_id)),
             Observation.observed_at >= start,
             Observation.observed_at <= now(),
             *approved_sources(),
