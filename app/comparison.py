@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -9,9 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.catalog import get_product
 from app.collection import record_attempt, reserve_requests
+from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
 from app.identity import match_variant
-from app.lookup import lookup_limit, reserve_stores, store_listing
+from app.limits import lookup_limit
+from app.lookup import reserve_stores, store_listing
 from app.models import ComparisonScan, Offer, Product, ProductMatch, Source
 from app.retail import (
     STORES,
@@ -25,7 +26,6 @@ from app.retail import (
 )
 
 router = APIRouter(prefix="/api/v1")
-_scan_lock = Lock()
 
 
 def listing_from_record(product: Product, offer: Offer) -> Listing:
@@ -67,7 +67,7 @@ def discover_store(retailer: str, query: str) -> dict:
     }
 
 
-def scan_comparison(db: Session, product_id: str) -> dict:
+def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = None) -> dict:
     product = get_product(db, product_id)
     existing = db.get(ComparisonScan, product_id)
     if existing and utc(existing.checked_at) > now() - timedelta(minutes=15):
@@ -217,6 +217,8 @@ def scan_comparison(db: Session, product_id: str) -> dict:
         "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
         "source_ids": sorted(source_ids),
     }
+    if lease_token:
+        fence_comparison(db, product_id, lease_token)
     scan = db.get(ComparisonScan, product_id)
     if scan:
         scan.result, scan.checked_at = result, now()
@@ -228,6 +230,9 @@ def scan_comparison(db: Session, product_id: str) -> dict:
 
 @router.post("/products/{product_id}/compare", dependencies=[Depends(lookup_limit)])
 def compare(product_id: str, db: Session = Depends(get_db)):
-    # Serialize scans in this pilot process to avoid duplicate retailer fan-out.
-    with _scan_lock:
-        return scan_comparison(db, product_id)
+    get_product(db, product_id)
+    token = claim_comparison(db, product_id)
+    try:
+        return scan_comparison(db, product_id, lease_token=token)
+    finally:
+        release_comparison(db, product_id, token)

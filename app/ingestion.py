@@ -1,13 +1,13 @@
 import hashlib
 import json
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import now, utc
 from app.models import Observation, Offer, Product, Source
-from app.schemas import IngestBatch
+from app.schemas import IngestBatch, ObservationInput
 
 
 class IngestionError(ValueError):
@@ -64,11 +64,14 @@ def ingest(
                 raise IngestionError("Event ID was reused with different data", 409)
             duplicates += 1
             continue
-        if record.variant_attributes != products[offer.product_id].attributes:
+        if json.dumps(record.variant_attributes, sort_keys=True, allow_nan=False) != json.dumps(
+            products[offer.product_id].attributes, sort_keys=True, allow_nan=False
+        ):
             raise IngestionError("Exact variant attributes do not match")
         pending[record.external_event_id] = (record, fingerprint, offer)
 
     try:
+        latest: dict[str, ObservationInput] = {}
         for record, fingerprint, offer in pending.values():
             observed_at = utc(record.observed_at)
             db.add(
@@ -97,11 +100,31 @@ def ingest(
                     else None,
                 )
             )
-            if offer.current_observed_at is None or observed_at > utc(offer.current_observed_at):
-                offer.current_observed_at = observed_at
-                offer.current_item_paise = record.item_paise
-                offer.current_shipping_paise = record.shipping_paise
-                offer.current_in_stock = record.in_stock
+            if offer.id not in latest or observed_at > utc(latest[offer.id].observed_at):
+                latest[offer.id] = record
+        db.flush()
+        # Compare against persisted timestamps, not a possibly stale ORM object.
+        # One conditional write per offer prevents delayed writers from replacing
+        # a newer quote while keeping every genuine historical observation.
+        for offer_id in sorted(latest):
+            record = latest[offer_id]
+            observed_at = utc(record.observed_at)
+            db.execute(
+                update(Offer)
+                .where(
+                    Offer.id == offer_id,
+                    or_(
+                        Offer.current_observed_at.is_(None), Offer.current_observed_at < observed_at
+                    ),
+                )
+                .values(
+                    current_observed_at=observed_at,
+                    current_item_paise=record.item_paise,
+                    current_shipping_paise=record.shipping_paise,
+                    current_in_stock=record.in_stock,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
         if commit:
             db.commit()
         else:

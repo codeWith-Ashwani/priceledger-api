@@ -20,13 +20,30 @@ def now() -> datetime:
 
 
 def make_engine(url: str):
-    kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {}
+    settings = get_settings()
+    if url.startswith("sqlite"):
+        kwargs = {"connect_args": {"check_same_thread": False, "timeout": 5}}
+    else:
+        kwargs = {
+            "pool_size": settings.database_pool_size,
+            "max_overflow": settings.database_max_overflow,
+            "pool_timeout": settings.database_pool_timeout_seconds,
+            "connect_args": {
+                "connect_timeout": 5,
+                "options": (
+                    f"-c statement_timeout={settings.database_statement_timeout_ms} "
+                    f"-c lock_timeout={settings.database_lock_timeout_ms} "
+                    "-c idle_in_transaction_session_timeout=60000"
+                ),
+            },
+        }
     engine = create_engine(url, pool_pre_ping=True, **kwargs)
     if url.startswith("sqlite"):
 
         @event.listens_for(engine, "connect")
         def enable_foreign_keys(connection, _):
             connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
 
     return engine
 

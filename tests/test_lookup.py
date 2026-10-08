@@ -2,7 +2,6 @@ import json
 from dataclasses import replace
 from datetime import timedelta
 
-import httpx
 import pytest
 from sqlalchemy import func, select
 
@@ -19,13 +18,6 @@ from app.retail import (
     search_store,
     target_for,
 )
-
-
-@pytest.fixture(autouse=True)
-def clear_lookup_limiter():
-    lookup_module._requests.clear()
-    yield
-    lookup_module._requests.clear()
 
 
 @pytest.fixture
@@ -265,14 +257,27 @@ def test_lookup_rate_limit(client, monkeypatch):
 
 
 def test_redirect_cannot_escape_retailer_allowlist(monkeypatch):
-    original_client = httpx.Client
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
-    )
-    monkeypatch.setattr("app.retail.check_public_dns", lambda host: None)
-    monkeypatch.setattr(
-        "app.retail.httpx.Client", lambda **kwargs: original_client(transport=transport, **kwargs)
-    )
+    class Response:
+        status = 302
+
+        def getheader(self, name):
+            return "http://127.0.0.1/private" if name == "Location" else None
+
+    class Connection:
+        def __init__(self, *args):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.public_http.public_addresses", lambda host: ["93.184.216.34"])
+    monkeypatch.setattr("app.public_http.PinnedHTTPSConnection", Connection)
     with pytest.raises(LookupError, match="product link"):
         fetch_page("https://www.flipkart.com/p/itm123", "flipkart")
 

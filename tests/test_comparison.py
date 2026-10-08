@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from app.comparison import scan_comparison
 from app.identity import match_variant, mobile_attributes, valid_gtin
-from app.lookup import _requests, store_listing
+from app.lookup import store_listing
 from app.models import Observation, ProductMatch, Source
 from app.retail import Listing, Target
 
@@ -107,7 +107,6 @@ def test_one_link_discovery_joins_prices_and_store_histories(client, db, monkeyp
             }
         ),
     )
-    _requests.clear()
     response = client.post(f"/api/v1/products/{product_id}/compare")
     assert response.status_code == 200
     assert response.json()["stores"][0]["status"] == "verified"

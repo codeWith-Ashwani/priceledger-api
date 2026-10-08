@@ -181,3 +181,22 @@ class SourceOfferMapping(Base):
     variant_snapshot: Mapped[dict] = mapped_column(JSON)
     context_snapshot: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ClientQuota(Base):
+    __tablename__ = "client_quotas"
+    __table_args__ = (
+        CheckConstraint("requests >= 1", name="ck_client_quotas_positive"),
+        Index("ix_client_quotas_expires", "expires_at"),
+    )
+    client_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    bucket: Mapped[str] = mapped_column(String(20), primary_key=True)
+    requests: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ComparisonLease(Base):
+    __tablename__ = "comparison_leases"
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
+    token: Mapped[str] = mapped_column(String(36))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -3,13 +3,11 @@
 import ipaddress
 import json
 import re
-import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
-import httpx
 from bs4 import BeautifulSoup
 
 from app.identity import mobile_attributes
@@ -150,78 +148,21 @@ def target_for(value: str) -> Target:
     )
 
 
-def check_public_dns(host: str):
-    addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
-        raise LookupError(
-            "unsafe_destination", "The retailer address could not be safely reached.", 400
-        )
-
-
 def fetch_page(url: str, retailer: str) -> tuple[str, str]:
-    """Allowlisted HTTPS only, validated redirects, bounded timeout and decoded body size."""
-    if retailer.startswith("site-"):
-        try:
-            return fetch_public(url, lambda candidate: allowed_url(candidate, retailer))
-        except (PublicFetchError, OSError, ValueError) as exc:
+    """All stores use DNS-pinned verified TLS, retailer-bound redirects and bounded bodies."""
+    try:
+        return fetch_public(url, lambda candidate: allowed_url(candidate, retailer))
+    except PublicFetchError as exc:
+        if retailer.startswith("site-"):
             raise LookupError(
                 "store_unavailable",
                 "This store could not expose a readable public product page. No price was recorded.",
             ) from exc
-    headers = {
-        "User-Agent": "PriceLedger/0.2 (user-requested product lookup; no login)",
-        "Accept": "text/html,application/xhtml+xml",
-    }
-    try:
-        with httpx.Client(
-            timeout=httpx.Timeout(12, connect=5),
-            headers=headers,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            for _ in range(5):
-                url = allowed_url(url, retailer)
-                check_public_dns(urlsplit(url).hostname)
-                with client.stream("GET", url) as response:
-                    if response.is_redirect:
-                        location = response.headers.get("location")
-                        if not location:
-                            break
-                        url = allowed_url(urljoin(url, location), retailer)
-                        continue
-                    if response.status_code in {403, 429, 503}:
-                        raise LookupError(
-                            "retailer_blocked",
-                            f"{STORES[retailer][0]} did not allow this lookup. No price was recorded.",
-                        )
-                    if response.status_code == 404:
-                        raise LookupError(
-                            "listing_unavailable",
-                            "The retailer did not return this product page. Check the link or try later.",
-                            404,
-                        )
-                    if response.status_code != 200:
-                        raise LookupError(
-                            "retailer_unavailable",
-                            "The retailer is temporarily unavailable. Try again later.",
-                        )
-                    if "text/html" not in response.headers.get("content-type", "").lower():
-                        raise LookupError(
-                            "invalid_page", "The retailer returned an unsupported page."
-                        )
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        body.extend(chunk)
-                        if len(body) > 3_000_000:
-                            raise LookupError(
-                                "page_too_large", "The retailer page exceeds the lookup size limit."
-                            )
-                    return bytes(body).decode(response.encoding or "utf-8", errors="replace"), url
-    except (httpx.HTTPError, OSError) as exc:
+        raise LookupError(exc.code, str(exc), exc.status) from exc
+    except OSError as exc:
         raise LookupError(
             "connection_failed", "The retailer could not be reached. Try again later."
         ) from exc
-    raise LookupError("redirect_limit", "The retailer redirected too many times.")
 
 
 def paise(value) -> int | None:

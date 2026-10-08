@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db, now, utc
 from app.groups import member_ids
+from app.limits import read_limit
 from app.models import (
     CollectionAttempt,
     CollectionBudget,
@@ -19,7 +20,7 @@ from app.models import (
     Source,
 )
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(read_limit)])
 
 
 def approved_sources():
@@ -191,6 +192,8 @@ def history(
 ):
     get_product(db, product_id)
     start = now() - timedelta(days=days)
+    members = member_ids(db, product_id)
+    maximum = get_settings().max_history_observations
     rows = db.execute(
         select(Observation, Offer, Retailer, Source)
         .select_from(Observation)
@@ -198,29 +201,38 @@ def history(
         .join(Retailer, Offer.retailer_id == Retailer.id)
         .join(Source, Observation.source_id == Source.id)
         .where(
-            Offer.product_id.in_(member_ids(db, product_id)),
+            Offer.product_id.in_(members),
             Observation.observed_at >= start,
             Observation.observed_at <= now(),
             *approved_sources(),
         )
-        .order_by(Observation.observed_at)
-    )
+        .order_by(Observation.observed_at, Observation.id)
+        .limit(maximum + 1)
+    ).all()
+    if len(rows) > maximum:
+        raise HTTPException(
+            422, "This history range has too many observations. Choose a shorter period."
+        )
     series = {}
     failures: dict[str, list] = {}
-    for offer_id, source_id, failed_at in db.execute(
+    failed_rows = db.execute(
         select(
             CollectionAttempt.offer_id, CollectionAttempt.source_id, CollectionAttempt.started_at
         )
         .join(Offer, CollectionAttempt.offer_id == Offer.id)
         .join(Source, CollectionAttempt.source_id == Source.id)
         .where(
-            Offer.product_id.in_(member_ids(db, product_id)),
+            Offer.product_id.in_(members),
             CollectionAttempt.outcome == "failure",
             CollectionAttempt.started_at >= start,
             *approved_sources(),
         )
-        .order_by(CollectionAttempt.started_at)
-    ):
+        .order_by(CollectionAttempt.started_at, CollectionAttempt.id)
+        .limit(maximum + 1)
+    ).all()
+    if len(failed_rows) > maximum:
+        raise HTTPException(422, "This history range has too many checks. Choose a shorter period.")
+    for offer_id, source_id, failed_at in failed_rows:
         failures.setdefault((offer_id, source_id), []).append(utc(failed_at))
     last_observed: dict[str, object] = {}
     failure_index: dict[str, int] = {}

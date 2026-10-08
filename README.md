@@ -9,7 +9,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 ```sh
 uv sync --locked
 uv run alembic upgrade head
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 Start with an empty catalog. No sample seed is included. Demo records from older development versions are excluded from every public product/history endpoint.
@@ -46,7 +46,7 @@ Each pass claims up to ten due jobs, oldest first (`--max-jobs` accepts 1â€�
 
 Workers use five-minute leases, conditional writes and PostgreSQL `SKIP LOCKED` claims. Expired workers cannot append prices; a later worker can reclaim their job. Failures retry with exponential delays from 15 minutes to 24 hours. Refusals/connection failures apply a persisted six-hour source cooldown; changed variants pause for review. The last valid quote remains intact. A paused identity needs operator review before requeuing; there is no public recovery control yet.
 
-A shared database budget limits each source to 500 reserved fetch operations per UTC day by default. URL lookup and collector checks reserve one operation, name searches reserve one per store, and comparisons conservatively reserve three per store (search plus up to two candidate checks). Unused reservations are not refunded; redirects are bounded by the HTTP adapter separately. Cached prices do not consume budget or create observations. This source budget supplements the process-local client limiter.
+A shared database budget limits each source to 500 reserved fetch operations per UTC day by default. URL lookup and collector checks reserve one operation, name searches reserve one per store, and comparisons conservatively reserve three per store (search plus up to two candidate checks). Unused reservations are not refunded; redirects are bounded by the HTTP adapter separately. Cached prices do not consume source budget or create observations. Client quotas are also persisted and shared across API processes.
 
 History starts at the first recorded observation. Launch dates and earlier prices remain unavailable unless actual historical evidence is imported. Missing shipping is never treated as free. Offline prices require dated, exact-variant shop evidence; there is no universal offline-price feed or fabricated percentage estimate.
 
@@ -57,13 +57,16 @@ History starts at the first recorded observation. Launch dates and earlier price
 - `GET /api/v1/products/{id}/coverage`: aggregate evidence counts/India days, first/latest observations, collection state, last check and next eligible time.
 - `GET /api/v1/categories`: stored categories.
 - `GET /api/v1/health`: service health.
+- `GET /api/v1/ready`: verifies database connectivity and the exact current migration heads; returns 503 when unavailable or outdated. Liveness remains independent of database availability.
 - `POST /api/v1/ingest`: administrative evidence import, disabled until `PRICELEDGER_ADMIN_TOKEN` is set; requires `X-Admin-Token`. Never expose this secret to the frontend.
 
 The original `/ingest` contract requires a permitted source, mapped exact offer belonging to that source, matching attributes, INR integer paise, aware timestamp and unique source event ID. Identical repeated events are idempotent; conflicting reuse is rejected. Backfills preserve newer current prices. `evidence_kind` accepts `recorded` (default), `page_check` or `historical_import`; it labels evidence and does not validate a provider's claim. New observations retain their submitted variant attributes. Public-page checks also retain seller/condition/region/availability at that check; older records retain an unknown snapshot rather than inventing past identity. Independent archive-to-offer mappings use the reviewed historical import workflow below; automatic provider adapters remain pending.
 
 Assessments use India calendar days for the median of daily delivered totals over 30 days ending seven days ago, with at least 20 observed days. Recorded lows cover a stated offer and period. A rise/drop pattern does not prove manipulation. Item-price charts and delivered-total assessments are labelled separately.
 
-Lookup is limited to 12 requests/minute/client in one process. Dedicated-store HTTP access uses an exact host allowlist, public-address checks, validated redirects, bounded timeouts and a 3 MB decoded page limit. Lookup and automatic-comparison quotas are separate. Generic URLs use DNS-pinned HTTPS connections: every resolved address must be public, the connection goes to that checked IP, TLS verifies the original hostname, and each redirect is revalidated. Generic fetches reject credentials, private/reserved addresses, unusual ports and non-product pages, with a 35-second deadline and 3 MB body limit. Shared rate limiting and enforced egress policy remain necessary before running multiple public replicas.
+Client quotas use atomic database upserts across processes, with separate lookup (12/minute), comparison (12/minute), catalog/assessment reads (120/minute) and authenticated administration (60/minute) buckets. Each fixed 60-second window starts at its first accepted request; bursts across window boundaries remain possible. Cached lookups still consume client quota. Denials return 429 and the remaining `Retry-After`; database failures fail closed with 503. Only a SHA-256 digest of the connection's client address is persisted, not raw addresses or credentials; this is pseudonymization, not anonymity. Forwarded headers are ignored by the application. Behind a proxy, configure Uvicorn's trusted proxy IPs explicitly, never a blanket trust of arbitrary clients. IP quotas are not per-account quotas and users behind one NAT share a bucket.
+
+All retailer and generic URL reads now use DNS-pinned HTTPS connections: every resolved address must be public, the socket connects to that checked IP, TLS verifies the original hostname, and each redirect is revalidated against the retailer. Credentials, private/reserved addresses, unusual ports and unsupported response types/encodings are rejected. Responses request identity encoding and cap HTML at 3 MB, with socket timeouts and a 35-second deadline checked between fetch steps/chunks. OS DNS resolution and response-header reading also depend on OS/socket behavior; enforce network egress and upstream deadlines when deploying. No environment proxy is used. This transport does not bypass retailer refusals.
 
 ## Verify
 
@@ -74,11 +77,13 @@ uv run alembic check
 
 GitHub CI checks unit contracts and PostgreSQL 17 migrations, lookup persistence, backfills and assessment roundtrips without external retailer dependencies.
 
+React's full browser suite runs many scenarios through one localhost client identity. For its temporary integration API servers, set `PRICELEDGER_READ_REQUESTS_PER_MINUTE=1000` and `PRICELEDGER_LOOKUP_REQUESTS_PER_MINUTE=120` so UI contracts do not exhaust one shared test bucket. The backend suite separately verifies the default quota behavior and concurrent enforcement. These overrides are test-run settings, not changes to the application defaults.
+
 Frontend: https://github.com/codeWith-Ashwani/priceledger-web. Only README documentation is published; research and sprints remain local. Both repositories remain private until the owner explicitly changes visibility.
 
 ## One-link cross-store comparison
 
-`POST /api/v1/products/{id}/compare` searches the other connected retailers automatically and verifies up to two readable candidate listings per retailer. Comparison scans are cached for 15 minutes and serialized in this pilot process to avoid duplicate fan-out. A retailer with no readable match is reported explicitly. Adding more discovery retailers requires their search/feed adapter; accepting a source URL is separate from guaranteeing coverage of every other retailer.
+`POST /api/v1/products/{id}/compare` searches the other connected retailers automatically and verifies up to two readable candidate listings per retailer. Comparison scans are cached for 15 minutes. Database leases prevent concurrent requests for one product from repeating retailer fan-out across API processes; different products can scan independently. A busy comparison returns 409 with `Retry-After`. Leases expire after ten minutes by default and are released on completion/failure; an expired/reclaimed owner cannot publish a comparison cache or release the newer owner's lease. Genuine listing observations already saved during discovery remain evidence even if the final comparison lease expires. A retailer with no readable match is reported explicitly. Adding more discovery retailers requires their search/feed adapter; accepting a source URL is separate from guaranteeing coverage of every other retailer.
 
 Verified matches create durable comparison links while keeping each retailer's original product attributes, offer and observations intact. Catalog detail, best-price assessment and history then include all verified group members. Matching requires either a valid shared GTIN with consistent brand/condition and no conflicting attributes, or complete matching phone brand/model/RAM/storage/colour/condition. A changed known condition cannot enter a previous variant's history. Missing information requires review; different variants remain excluded. Their genuine prices and links may be displayed separately without entering the exact-product winner or combined graph.
 
@@ -108,3 +113,19 @@ Committed imports create independent source-to-offer mappings and observations w
 History series are keyed by offer/source/price type, so overlapping archives remain individually attributable without creating extra retailer offers. Coverage includes all currently permitted historical sources, even when an independent live source is disabled. Revoking a source hides its observations. Assessments select one approved evidence source per India day: own records first, then deterministic source-ID order. They exclude incompatible imported seller/condition/region and non-listing price types. The source choice is a reproducible precedence rule, not a confidence estimate; graphs/ledgers retain all approved original observations. Advertised discounts use the current own-source observation, never a mismatched imported MRP.
 
 SQLite migrations preserve existing data/checks and add a named import foreign key. PostgreSQL commits lock the source and product/offer identity rows before revalidation; SQLite's conditional draft write serializes writers. Bounded files, bulk lookups and commit batching avoid one lookup per row. Database constraints and transaction rollback prevent partial event/mapping writes under concurrency. Import code cannot verify a source's truthfulness: operators must audit original records, exact identities and retention/display permissions. No external historical feed or full launch archive is connected automatically.
+
+## Backend safeguards and operations
+
+Mutating requests are buffered within a configurable 1.5 MB ceiling and 15-second body deadline before parsing. Streaming/chunked requests obey the same limit. Compressed bodies, inconsistent lengths, non-JSON content, duplicate JSON fields, non-finite numbers and invalid Unicode are rejected. Administrative credentials are checked before reading files, then authenticated requests consume the shared admin quota. The reviewed import file/row limits remain separately enforced. `/ingest` also requires strict integer paise and booleans, bounded finite attributes and known fields; exact typed variant matching prevents booleans from matching numeric variant IDs. Current quotes update conditionally against persisted timestamps, preventing stale writers from overwriting a newer quote.
+
+History responses cap both observations and failed checks at 10,000 each by default. An oversized range returns 422 with a request to choose a shorter period; evidence is never silently truncated. Aggregate/paginated large-history APIs remain future work. PostgreSQL connections use bounded pools (five connections plus five overflow per process, ten-second pool wait), five-second connect/lock timeouts, 30-second statement timeouts and a 60-second idle-transaction timeout. SQLite uses a five-second busy timeout and foreign-key enforcement. Tune these settings with measured workloads rather than treating them as national-scale capacity guarantees.
+
+Every application response carries a fresh server-generated `X-Request-ID`, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Application request logs contain request ID, method, route template, status and elapsed time; they omit query strings, product IDs, client addresses, tokens, file contents and exception values. Unexpected/database failures return sanitized messages (500/503); integrity conflicts return 409. Validation errors omit submitted values. CORS exposes request IDs and retry delays to approved origins. `--no-access-log` avoids Uvicorn's separate raw-URL access logs; configure any proxy logging with the same privacy requirements. Infrastructure preflight/error responses outside the application may have separate logging/header policies.
+
+Run bounded quota housekeeping periodically using your service/job infrastructure:
+
+```sh
+uv run python -m app.maintenance --max-rows 1000
+```
+
+Each pass removes at most the requested number of quota windows expired more than one day ago, rechecking expiry before deletion. It leaves active quotas, observations and import audit records intact. This command is not scheduled automatically. Run `uv run alembic upgrade head` before starting the updated API; use `/ready` for readiness and `/health` for liveness. CI verifies lint, model/migration consistency, unit contracts and PostgreSQL concurrency, lease fencing, stale quote protection and configured timeouts. Load measurements, deployment-wide egress controls, backups/restore and account-aware quotas remain production work.

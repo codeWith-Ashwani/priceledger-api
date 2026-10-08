@@ -16,7 +16,9 @@ jobs:
           version: "0.12.6"
           enable-cache: true
       - run: uv sync --locked
+      - run: uv run ruff check app tests
       - run: uv run alembic upgrade head
+      - run: uv run alembic check
       - run: uv run pytest -q
   postgres:
     runs-on: ubuntu-latest

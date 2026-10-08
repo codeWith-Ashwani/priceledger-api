@@ -9,7 +9,9 @@ from urllib.parse import urljoin, urlsplit
 
 
 class PublicFetchError(Exception):
-    pass
+    def __init__(self, message: str, code: str = "invalid_page", status: int = 502):
+        super().__init__(message)
+        self.code, self.status = code, status
 
 
 def public_addresses(host: str) -> list[str]:
@@ -23,7 +25,11 @@ def public_addresses(host: str) -> list[str]:
             or (getattr(ip, "ipv4_mapped", None) and not ip.ipv4_mapped.is_global)
             or (getattr(ip, "sixtofour", None) and not ip.sixtofour.is_global)
         ):
-            raise PublicFetchError("Private and reserved network addresses cannot be fetched.")
+            raise PublicFetchError(
+                "Private and reserved network addresses cannot be fetched.",
+                "unsafe_destination",
+                400,
+            )
     if not addresses:
         raise PublicFetchError("The store address could not be resolved.")
     return addresses
@@ -70,9 +76,21 @@ def fetch_public(url: str, validate_url) -> tuple[str, str]:
                     raise PublicFetchError("The store returned an invalid redirect.")
                 url = validate_url(urljoin(url, location))
                 continue
+            if response.status in {403, 429, 503}:
+                raise PublicFetchError(
+                    "The store did not allow this lookup. No price was recorded.",
+                    "retailer_blocked",
+                )
+            if response.status == 404:
+                raise PublicFetchError(
+                    "The store did not return this product page. Check the link.",
+                    "listing_unavailable",
+                    404,
+                )
             if response.status != 200:
                 raise PublicFetchError(
-                    f"The store returned HTTP {response.status}. No price was recorded."
+                    f"The store returned HTTP {response.status}. No price was recorded.",
+                    "retailer_unavailable",
                 )
             if "text/html" not in (response.getheader("Content-Type") or "").lower():
                 raise PublicFetchError("This link did not return an HTML product page.")
@@ -88,12 +106,14 @@ def fetch_public(url: str, validate_url) -> tuple[str, str]:
                 chunk = response.read(65536)
                 if not chunk:
                     break
+                if len(body) + len(chunk) > 3_000_000:
+                    raise PublicFetchError(
+                        "The store page exceeds the lookup size limit.", "page_too_large"
+                    )
                 body.extend(chunk)
-                if len(body) > 3_000_000:
-                    raise PublicFetchError("The store page exceeds the lookup size limit.")
             return bytes(body).decode("utf-8", errors="replace"), url
         except http.client.HTTPException as exc:
             raise PublicFetchError("The store returned an invalid HTTP response.") from exc
         finally:
             connection.close()
-    raise PublicFetchError("The store redirected too many times.")
+    raise PublicFetchError("The store redirected too many times.", "redirect_limit")

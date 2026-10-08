@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.catalog import approved_sources, comparison_offers, get_product
 from app.db import get_db, now, utc
+from app.limits import read_limit
 from app.models import Observation, Offer, Source
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(read_limit)])
 
 
 def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: datetime) -> dict:

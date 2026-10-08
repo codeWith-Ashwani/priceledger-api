@@ -1,10 +1,7 @@
-from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Lock
-from time import monotonic
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +11,7 @@ from app.collection import public_source, record_attempt, reserve_requests, touc
 from app.config import get_settings
 from app.db import get_db, now, utc
 from app.ingestion import ingest
+from app.limits import lookup_limit
 from app.models import Offer, Product, Retailer, Source
 from app.retail import (
     STORES,
@@ -28,36 +26,10 @@ from app.retail import (
 from app.schemas import IngestBatch, ObservationInput
 
 router = APIRouter(prefix="/api/v1")
-_requests: dict[str, deque] = defaultdict(deque)
-_lock = Lock()
 
 
 class LookupInput(BaseModel):
     query: str = Field(min_length=3, max_length=2048)
-
-
-def lookup_limit(request: Request):
-    client = request.client.host if request.client else "local"
-    action = "comparison" if request.url.path.endswith("/compare") else "lookup"
-    key = f"{client}:{action}"
-    at = monotonic()
-    with _lock:
-        # Bounded process-local limiter. Use a shared limiter before deploying replicas.
-        for old_key in list(_requests):
-            if not _requests[old_key] or _requests[old_key][-1] <= at - 60:
-                del _requests[old_key]
-        queue = _requests[key]
-        while queue and queue[0] <= at - 60:
-            queue.popleft()
-        if len(queue) >= get_settings().lookup_requests_per_minute:
-            raise HTTPException(
-                429,
-                "Too many lookups. Wait one minute and try again.",
-                headers={"Retry-After": "60"},
-            )
-        if len(_requests) > 10_000:
-            raise HTTPException(503, "Lookup capacity is temporarily full.")
-        queue.append(at)
 
 
 def store_listing(

@@ -277,3 +277,115 @@ def test_postgres_history_imports_are_atomic_and_replayable(monkeypatch):
             for series in history["series"]
         )
         assert len(client.get("/api/v1/products/flipkart:MOBPGTEST128").json()["offers"]) == 2
+
+
+def test_postgres_shared_quota_and_comparison_leases_are_atomic(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from app.coordination import claim_comparison, fence_comparison, release_comparison
+    from app.limits import reserve_client
+    from app.models import ClientQuota, ComparisonLease
+
+    client_key = str(uuid4())
+    at = now()
+    monkeypatch.setattr("app.limits.now", lambda: at)
+
+    def reserve(_):
+        with SessionLocal() as db:
+            try:
+                reserve_client(db, client_key, "lookup", 5)
+                return True
+            except HTTPException as exc:
+                assert exc.status_code == 429 and exc.headers["Retry-After"] == "60"
+                return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert sum(pool.map(reserve, range(24))) == 5
+    with SessionLocal() as db:
+        import hashlib
+
+        key = hashlib.sha256(client_key.encode()).hexdigest()
+        assert db.get(ClientQuota, (key, "lookup")).requests == 5
+
+    product_id = "flipkart:MOBPGTEST128"
+
+    def claim(_):
+        with SessionLocal() as db:
+            try:
+                return claim_comparison(db, product_id)
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        winners = [token for token in pool.map(claim, range(16)) if token]
+    assert len(winners) == 1
+    with SessionLocal() as db:
+        old_token = winners[0]
+        lease = db.get(ComparisonLease, product_id)
+        lease.expires_at = now() - timedelta(seconds=1)
+        db.commit()
+        new_token = claim_comparison(db, product_id)
+        with pytest.raises(HTTPException) as expired:
+            fence_comparison(db, product_id, old_token)
+        assert expired.value.status_code == 409
+        release_comparison(db, product_id, old_token)
+        assert (
+            db.scalar(select(ComparisonLease.token).where(ComparisonLease.product_id == product_id))
+            == new_token
+        )
+        release_comparison(db, product_id, new_token)
+
+
+def test_postgres_stale_quote_writer_preserves_newer_price():
+    from uuid import uuid4
+
+    from app.models import Offer, Product
+
+    offer_id = "flipkart:MOBPGTEST128:public-page"
+    at = now()
+    with SessionLocal() as stale_db:
+        stale = stale_db.get(Offer, offer_id)
+        old_at = stale.current_observed_at
+        with SessionLocal() as newer_db:
+            newer = newer_db.get(Offer, offer_id)
+            newer.current_observed_at, newer.current_item_paise = at, 3599900
+            newer_db.commit()
+        assert stale.current_observed_at == old_at
+        product = stale_db.get(Product, stale.product_id)
+        record = ObservationInput(
+            offer_id=offer_id,
+            external_event_id="pg-stale-" + str(uuid4()),
+            observed_at=at - timedelta(seconds=10),
+            variant_attributes=product.attributes,
+            item_paise=3199900,
+            shipping_paise=0,
+            in_stock=True,
+        )
+        ingest(
+            stale_db, IngestBatch(source_id=stale.source_id, observations=[record]), demo_mode=False
+        )
+        stale_db.refresh(stale)
+        assert stale.current_item_paise == 3599900 and stale.current_observed_at == at
+
+
+def test_postgres_readiness_and_database_timeouts():
+    from sqlalchemy import text
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/ready").status_code == 200
+    with SessionLocal() as db:
+        settings = get_settings()
+        for setting, expected in (
+            ("statement_timeout", settings.database_statement_timeout_ms),
+            ("lock_timeout", settings.database_lock_timeout_ms),
+        ):
+            milliseconds = db.scalar(
+                text("SELECT extract(epoch FROM current_setting(:setting)::interval) * 1000"),
+                {"setting": setting},
+            )
+            assert int(milliseconds) == expected
