@@ -137,8 +137,9 @@ def test_postgres_exclusive_claims_and_atomic_budget(monkeypatch):
         first_job = locked.scalar(
             select(CollectionJob)
             .where(CollectionJob.offer_id.like("flipkart:MOBPGCLAIM%"))
-            .order_by(CollectionJob.offer_id)
-            .with_for_update()
+                .order_by(CollectionJob.offer_id)
+                .limit(1)
+                .with_for_update()
         )
         with SessionLocal() as other:
             claim2 = claim_job(other)
