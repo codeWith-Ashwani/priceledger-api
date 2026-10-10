@@ -20,6 +20,7 @@ STORES = {
     "meesho": ("Meesho", "#aa2878", "https://www.meesho.com/search?"),
     "croma": ("Croma", "#08776a", "https://www.croma.com/searchB?"),
     "reliance": ("Reliance Digital", "#cf3038", "https://www.reliancedigital.in/search?"),
+    "iqoo": ("iQOO Official Store", "#986b08", "https://shop.iqoo.com/in/products/phone"),
 }
 HOSTS = {
     "amazon.in": "amazon",
@@ -37,6 +38,7 @@ HOSTS = {
     "www.croma.com": "croma",
     "reliancedigital.in": "reliance",
     "www.reliancedigital.in": "reliance",
+    "shop.iqoo.com": "iqoo",
 }
 SHORT_HOSTS = {"amzn.in", "amzn.to", "fkrt.it", "dl.flipkart.com"}
 IMAGE_HOSTS = {
@@ -50,6 +52,7 @@ IMAGE_HOSTS = {
     "media.croma.com",
     "www.reliancedigital.in",
     "assets.reliancedigital.in",
+    "exstatic-in.iqoo.com",
 }
 
 
@@ -82,14 +85,17 @@ class Listing:
     rating: dict | None = None
 
 
-def discovery_retailers(category: str | None = None) -> list[str]:
+def discovery_retailers(category: str | None = None, brand: str | None = None) -> list[str]:
     configured = list(dict.fromkeys(get_settings().discovery_retailers))
     # Electronics stores are irrelevant to known fashion/grocery/beauty categories.
     non_electronics = category and re.search(
         r"fashion|clothing|grocery|beauty|personal-care|food", category, re.I
     )
     return [
-        store for store in configured if not non_electronics or store not in {"croma", "reliance"}
+        store
+        for store in configured
+        if (not non_electronics or store not in {"croma", "reliance", "iqoo"})
+        and (store != "iqoo" or brand is None or brand.lower() == "iqoo")
     ]
 
 
@@ -170,6 +176,16 @@ def target_for(value: str) -> Target:
         match = re.search(r"/p/(\d{4,20})(?:/|$)", parsed.path)
         if match:
             return Target(retailer, "https://www.croma.com" + parsed.path.rstrip("/"), match[1])
+    elif retailer == "iqoo":
+        match = re.fullmatch(r"/in/product/(\d{1,12})/?", parsed.path)
+        sku = parse_qs(parsed.query).get("skuId", [None])[0]
+        if match and (sku is None or re.fullmatch(r"\d{1,12}", sku)):
+            canonical = "https://shop.iqoo.com/in/product/" + match[1]
+            return Target(
+                retailer,
+                canonical + ("?" + urlencode({"skuId": sku}) if sku else ""),
+                match[1] + "-" + sku if sku else "spu-" + match[1],
+            )
     elif retailer == "reliance":
         match = re.search(r"/product/([a-zA-Z0-9-]+)(?:/|$)", parsed.path)
         legacy = re.search(r"/p/(\d{4,20})(?:/|$)", parsed.path)
@@ -276,6 +292,22 @@ def product_rating(value) -> dict | None:
         return None
 
 
+def amazon_condition(soup: BeautifulSoup, asin: str) -> str:
+    for node in soup.select('script[type="a-state"][data-a-state]'):
+        try:
+            if json.loads(node["data-a-state"]).get("key") != "vas-base-vm":
+                continue
+            data = json.loads(node.get_text())
+            if data.get("productAsin") != asin:
+                continue
+            return {("NEW",): "new", ("USED",): "used"}.get(
+                tuple(data.get("buyingOptionTypes", [])), "unknown"
+            )
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return "unknown"
+
+
 def parse_listing(html: str, target: Target) -> Listing:
     soup = BeautifulSoup(html, "html.parser")
     if soup.select_one('form[action*="validateCaptcha"], #captchacharacters'):
@@ -301,6 +333,14 @@ def parse_listing(html: str, target: Target) -> Listing:
         products = [item for item in products if str(item.get("sku", "")) == target.external_id]
     if len(products) == 1:
         item = products[0]
+        if target.retailer == "iqoo":
+            sku = str(item.get("sku", ""))
+            requested = parse_qs(urlsplit(target.url).query).get("skuId", [None])[0]
+            if not re.fullmatch(r"\d{1,12}", sku) or (requested and requested != sku):
+                raise LookupError(
+                    "missing_variant", "iQOO did not serve the requested product SKU."
+                )
+            target = target_for(target.url.split("?", 1)[0] + "?" + urlencode({"skuId": sku}))
         offers = item.get("offers", {})
         if isinstance(offers, list):
             offers = offers[0] if len(offers) == 1 else {}
@@ -342,6 +382,14 @@ def parse_listing(html: str, target: Target) -> Listing:
                 heading = soup.select_one("h1") if target.retailer == "flipkart" else None
                 if heading and title in heading.get_text(" ", strip=True):
                     identity_title = heading.get_text(" ", strip=True)
+                if target.retailer == "iqoo":
+                    heading = soup.select_one("h1.title")
+                    color = soup.select_one('[role="radio"][aria-checked="true"] .color-name')
+                    if heading and title in heading.get_text(" ", strip=True):
+                        identity_title = heading.get_text(" ", strip=True)
+                        title = str(brand) + " " + identity_title
+                    if color:
+                        attributes["color"] = color.get_text(" ", strip=True)
                 attributes = mobile_attributes(identity_title, str(brand), attributes)
                 availability = str(offers.get("availability", "")).split("/")[-1]
                 availability = {
@@ -469,7 +517,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                 amount,
                 None,
                 state,
-                "unknown",
+                amazon_condition(soup, target.external_id),
                 seller.get_text(" ", strip=True)[:150] if seller else "Seller not stated",
                 rating,
             )
@@ -495,6 +543,29 @@ def load_listing(target: Target) -> Listing:
 
 
 def search_store(retailer: str, query: str) -> dict:
+    if retailer == "iqoo":
+        from app.iqoo import search_candidates
+
+        search_url = STORES[retailer][2]
+        try:
+            items = search_candidates(query, lambda url: fetch_page(url, retailer)[0])
+            return {
+                "retailer": retailer,
+                "retailer_name": STORES[retailer][0],
+                "status": "ok" if items else "no_matches",
+                "message": "Official catalog checked; exact SKU prices require verification.",
+                "search_url": search_url,
+                "items": items,
+            }
+        except LookupError as exc:
+            return {
+                "retailer": retailer,
+                "retailer_name": STORES[retailer][0],
+                "status": exc.code,
+                "message": exc.message,
+                "search_url": search_url,
+                "items": [],
+            }
     search_url = STORES[retailer][2] + urlencode({"k" if retailer == "amazon" else "q": query})
     try:
         html, _ = fetch_page(search_url, retailer)
@@ -527,6 +598,9 @@ def search_store(retailer: str, query: str) -> dict:
             if key not in items:
                 items[key] = {
                     "title": title[:250],
+                    "variant_attributes": mobile_attributes(
+                        anchor.get_text(" ", strip=True)[:1500], "", {}
+                    ),
                     "url": target.url,
                     "retailer": retailer,
                     "retailer_name": STORES[retailer][0],

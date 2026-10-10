@@ -16,12 +16,19 @@ def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
         result["ram_gb"] = int(ram[1])
     if storage:
         result["storage_gb"] = int(storage[1])
-    elif combo:
+    elif combo and not ram:
         result["ram_gb"], result["storage_gb"] = int(combo[1]), int(combo[2])
     else:
         sizes = [int(match[1]) for match in re.finditer(r"(\d+)\s*GB(?!\s*RAM)", title, re.I)]
         if len(sizes) == 1 and sizes[0] >= 32:
             result["storage_gb"] = sizes[0]
+    variant = re.search(r"\(([^()]*(?:\d+\s*GB|RAM|Storage)[^()]*)\)", title, re.I)
+    if "color" not in result and variant:
+        first = variant[1].split(",", 1)[0].strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z -]{1,45}", first) and not re.search(
+            r"\b(?:RAM|Storage|ROM|GB)\b", first, re.I
+        ):
+            result["color"] = first
     if "color" not in result:
         colors = re.findall(
             r"\b(blue|black|white|green|pink|red|silver|grey|gray|yellow|purple)\b", title.lower()
@@ -29,12 +36,36 @@ def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
         if len(set(colors)) == 1:
             result["color"] = colors[0]
     # Phones only: never apply these heuristics to clothing, packs or accessories.
-    if ("phone" in title.lower() or "iphone" in title.lower()) and not re.search(
-        r"\b(?:cover|case|charger|protector|cable)\b", title, re.I
+    phone_brand = normalized(brand) in {
+        "iqoo",
+        "vivo",
+        "oppo",
+        "oneplus",
+        "realme",
+        "poco",
+        "redmi",
+        "samsung",
+        "motorola",
+        "nothing",
+        "apple",
+        "google",
+        "infinix",
+        "tecno",
+        "nokia",
+        "honor",
+    }
+    explicit_memory = "ram_gb" in result and "storage_gb" in result
+    if (
+        "phone" in title.lower() or (phone_brand and explicit_memory and re.search(r"\d", title))
+    ) and not re.search(
+        r"\b(?:cover|case|charger|protector|cable|laptop|notebook|tablet|tab|pad|book|ssd)\b",
+        title,
+        re.I,
     ):
+        model_title = title[: variant.start()] if variant else title
         base = re.split(
             r"\((?=\s*(?:\d+\s*GB|blue|black|white|green|pink|red))|\b\d+\s*GB|\b(?:blue|black|white|green|pink|red|silver|grey|gray)\b",
-            title,
+            model_title.split("|", 1)[0],
             maxsplit=1,
             flags=re.I,
         )[0]
@@ -64,6 +95,13 @@ def match_variant(left, right) -> dict:
             conflicts.append(key)
     if brand_a != brand_b or brand_a == "brandnotstated":
         return {"status": "review", "reason": "Brand identity is not confirmed."}
+    if conflicts == ["model"] and normalized(
+        re.sub(r"\b\d{1,3}W\b", "", str(a["model"]), flags=re.I)
+    ) == normalized(re.sub(r"\b\d{1,3}W\b", "", str(b["model"]), flags=re.I)):
+        return {
+            "status": "review",
+            "reason": "Retailer model names differ in their charging label; a shared manufacturer identifier is needed.",
+        }
     if conflicts or (
         left.condition != "unknown"
         and right.condition != "unknown"

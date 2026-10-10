@@ -12,12 +12,15 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     admin_token: str = ""
     demo_mode: bool = False
-    discovery_retailers: list[Literal["amazon", "flipkart", "meesho", "croma", "reliance"]] = [
+    discovery_retailers: list[
+        Literal["amazon", "flipkart", "meesho", "croma", "reliance", "iqoo"]
+    ] = [
         "amazon",
         "flipkart",
         "meesho",
         "croma",
         "reliance",
+        "iqoo",
     ]
     lookup_cache_minutes: int = Field(default=15, ge=1, le=1440)
     lookup_requests_per_minute: int = Field(default=12, ge=1, le=1000)

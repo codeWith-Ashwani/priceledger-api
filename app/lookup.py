@@ -240,7 +240,10 @@ def reserve_stores(db: Session, retailers: list[str], *, cost: int) -> tuple[lis
     permitted, limited = [], {}
     for retailer in retailers:
         try:
-            reserve_requests(db, Target(retailer, STORES[retailer][2], None), cost)
+            # Official-store search reads its catalog plus one model's SKU list.
+            reserve_requests(
+                db, Target(retailer, STORES[retailer][2], None), cost + (retailer == "iqoo")
+            )
             permitted.append(retailer)
         except LookupError as exc:
             db.rollback()

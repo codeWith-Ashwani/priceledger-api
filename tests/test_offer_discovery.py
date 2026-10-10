@@ -41,7 +41,7 @@ def listing(retailer="flipkart", price=100000, **extras):
 
 
 def test_registry_is_configurable_and_category_aware(monkeypatch):
-    assert discovery_retailers() == ["amazon", "flipkart", "meesho", "croma", "reliance"]
+    assert discovery_retailers() == ["amazon", "flipkart", "meesho", "croma", "reliance", "iqoo"]
     assert discovery_retailers("grocery") == ["amazon", "flipkart", "meesho"]
     monkeypatch.setattr(get_settings(), "discovery_retailers", ["croma", "amazon", "croma"])
     assert discovery_retailers("mobile") == ["croma", "amazon"]
@@ -125,7 +125,7 @@ def test_one_lookup_comparison_returns_four_other_verified_stores(client, db, mo
     anchor = listing()
     product_id = store_listing(db, anchor)
 
-    def discover(retailer, query):
+    def discover(retailer, query, expected=None):
         candidate = listing(retailer, price=90000 if retailer == "amazon" else 110000)
         return {
             "search": {"status": "ok", "search_url": candidate.target.url},
@@ -172,7 +172,7 @@ def test_tracked_generic_domains_join_without_a_search_adapter(client, db, monke
 def test_wrong_variant_and_wrong_retailer_cannot_join_verified_cards(client, db, monkeypatch):
     anchor_id = store_listing(db, listing())
 
-    def discover(retailer, query):
+    def discover(retailer, query, expected=None):
         candidate = listing(
             "amazon", attributes={"gtin13": "1234567890128", "color": "Red"}, price=100
         )

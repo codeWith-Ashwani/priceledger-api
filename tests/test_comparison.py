@@ -94,7 +94,7 @@ def test_one_link_discovery_joins_prices_and_store_histories(client, db, monkeyp
     product_id = store_listing(db, left)
     monkeypatch.setattr(
         "app.comparison.discover_store",
-        lambda retailer, query: (
+        lambda retailer, query, expected=None: (
             discovery(right)
             if retailer == "amazon"
             else {
@@ -124,7 +124,9 @@ def test_uncertain_matches_never_enter_cheapest_price_or_history(client, db, mon
     left, right = pair
     product_id = store_listing(db, left)
     right = replace(right, condition="unknown", item_paise=100)
-    monkeypatch.setattr("app.comparison.discover_store", lambda retailer, query: discovery(right))
+    monkeypatch.setattr(
+        "app.comparison.discover_store", lambda retailer, query, expected=None: discovery(right)
+    )
     result = scan_comparison(db, product_id)
     assert result["stores"][0]["items"][0]["match_status"] == "review"
     assert db.scalar(select(func.count()).select_from(ProductMatch)) == 0
@@ -137,7 +139,9 @@ def test_revoked_source_is_removed_from_cached_comparison_and_history(
 ):
     left, right = pair
     product_id = store_listing(db, left)
-    monkeypatch.setattr("app.comparison.discover_store", lambda retailer, query: discovery(right))
+    monkeypatch.setattr(
+        "app.comparison.discover_store", lambda retailer, query, expected=None: discovery(right)
+    )
     scan_comparison(db, product_id)
     db.get(Source, "public-page:amazon").display_allowed = False
     db.commit()

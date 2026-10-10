@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -10,7 +11,7 @@ from app.catalog import approved_sources, get_product
 from app.collection import record_attempt, reserve_requests
 from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
-from app.identity import match_variant
+from app.identity import match_variant, mobile_attributes
 from app.limits import lookup_limit
 from app.lookup import reserve_stores, store_listing
 from app.models import ComparisonScan, Offer, Product, ProductMatch, Source
@@ -82,7 +83,7 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
         product.title,
         product.brand,
         product.category,
-        product.attributes,
+        {**mobile_attributes(product.title, product.brand, {}), **product.attributes},
         product.image_url,
         offer.current_item_paise or 0,
         offer.current_shipping_paise,
@@ -92,13 +93,36 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
     )
 
 
-def discover_store(retailer: str, query: str) -> dict:
+def candidate_priority(item: dict, expected: dict) -> tuple[int, int]:
+    actual = {**mobile_attributes(item["title"], "", {}), **item.get("variant_attributes", {})}
+    conflicts, agreements = 0, 0
+    for key in ("ram_gb", "storage_gb", "color"):
+        if key in actual and key in expected:
+            if str(actual[key]).lower() == str(expected[key]).lower():
+                agreements += 1
+            else:
+                conflicts += 1
+    return conflicts, -agreements
+
+
+def discovery_query(anchor: Listing) -> str:
+    model = anchor.attributes.get("model")
+    if model:
+        # Charging/connectivity labels are optional search terms, never ignored
+        # during exact identity verification.
+        model = re.sub(r"\b(?:\d{1,3}W|[2345]G)\b", "", str(model), flags=re.I)
+        return re.sub(r"\s+", " ", f"{anchor.brand} {model}").strip()[:128]
+    return anchor.title.split("|", 1)[0][:128]
+
+
+def discover_store(retailer: str, query: str, expected: dict | None = None) -> dict:
     result = search_store(retailer, query)
     candidates = []
     failures = []
     failed_checks = []
     # Bounded verification: read at most two exact search candidates from each store.
-    for item in result["items"][:2]:
+    ranked = sorted(result["items"], key=lambda item: candidate_priority(item, expected or {}))
+    for item in ranked[:2]:
         started_at = now()
         try:
             candidates.append(load_listing(target_for(item["url"])))
@@ -123,11 +147,12 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     )
     selected = [
         retailer
-        for retailer in discovery_retailers(product.category)
+        for retailer in discovery_retailers(product.category, product.brand)
         if retailer not in anchor_retailers
     ]
     if (
         existing
+        and existing.result.get("discovery_version") == 2
         and existing.result.get("discovery_retailers") == selected
         and utc(existing.checked_at) > now() - timedelta(minutes=15)
     ):
@@ -166,24 +191,24 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     anchor = listing_from_record(product, offer)
     link_catalog_matches(db, product_id, anchor)
     # Enrich old records with newly available variant metadata from the same listing.
-    if "identity_category" not in anchor.attributes and "phone" in anchor.title.lower():
+    if (
+        "identity_category" not in product.attributes
+        and anchor.attributes.get("identity_category") == "mobile"
+    ):
         try:
             reserve_requests(db, anchor.target)
             anchor = load_listing(anchor.target)
             store_listing(db, anchor)
         except LookupError:
             db.rollback()
-    model = anchor.attributes.get("model", "")
-    query = f"{anchor.brand} {model}" if model else anchor.title
-    for key in ("storage_gb", "color"):
-        if key in anchor.attributes:
-            query += " " + str(anchor.attributes[key])
-    query = query[:128]
+    query = discovery_query(anchor)
     retailers = selected
     # Reserve one search and up to two page reads per store before parallel discovery.
     permitted, limited = reserve_stores(db, retailers, cost=3)
     with ThreadPoolExecutor(max_workers=3) as pool:
-        discoveries = list(pool.map(lambda retailer: discover_store(retailer, query), permitted))
+        discoveries = list(
+            pool.map(lambda retailer: discover_store(retailer, query, anchor.attributes), permitted)
+        )
     by_store = dict(zip(permitted, discoveries, strict=True))
     discovered = [
         by_store.get(retailer)
@@ -276,6 +301,10 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                 else (
                     discovery["failures"][0]
                     if discovery["failures"]
+                    else "This search returned no readable candidates. The store may still stock this product."
+                    if search["status"] == "no_matches"
+                    else search.get("message", "No readable candidate listing was returned.")
+                    if search["status"] != "ok"
                     else "No verified offer for this exact variant was readable."
                 ),
                 "search_url": search["search_url"],
@@ -290,6 +319,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
         "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
         "source_ids": sorted(source_ids),
         "discovery_retailers": retailers,
+        "discovery_version": 2,
     }
     if lease_token:
         fence_comparison(db, product_id, lease_token)

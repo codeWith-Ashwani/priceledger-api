@@ -84,7 +84,7 @@ def test_postgres_lookup_history_and_assessment_roundtrip(monkeypatch):
         )
         monkeypatch.setattr(
             "app.comparison.discover_store",
-            lambda retailer, query: {
+            lambda retailer, query, expected=None: {
                 "search": {"status": "ok", "search_url": "https://www.amazon.in/s?k=test"},
                 "listings": [other] if retailer == "amazon" else [],
                 "failures": [],
