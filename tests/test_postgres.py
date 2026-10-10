@@ -36,6 +36,7 @@ def test_postgres_lookup_history_and_assessment_roundtrip(monkeypatch):
         "in_stock",
         "new",
         "Integration seller",
+        {"value": 4.2, "best": 5.0, "count": 120},
     )
     monkeypatch.setattr("app.lookup.load_listing", lambda ignored: listing)
     with TestClient(app) as client:
@@ -67,6 +68,8 @@ def test_postgres_lookup_history_and_assessment_roundtrip(monkeypatch):
         assert detail["best_price_paise"] == 3699900
         assert detail["is_demo"] is False
         assert detail["offers"][0]["product_url"] == target.url
+        assert detail["offers"][0]["title"] == listing.title
+        assert detail["offers"][0]["rating"]["value"] == 4.2
         history = client.get(f"/api/v1/products/{product_id}/history?days=365&basis=item").json()
         assert len(history["series"]) == 1
         assert len(history["series"][0]["points"]) == 31
@@ -389,3 +392,55 @@ def test_postgres_readiness_and_database_timeouts():
                 {"setting": setting},
             )
             assert int(milliseconds) == expected
+
+
+def test_postgres_opposite_catalog_scans_preserve_one_match():
+    from concurrent.futures import ThreadPoolExecutor
+    from uuid import uuid4
+
+    from sqlalchemy import func, select
+
+    from app.comparison import link_catalog_matches
+    from app.lookup import store_listing
+    from app.models import ProductMatch
+    from app.retail import target_for
+
+    brand = "Concurrency " + str(uuid4())
+    listings = [
+        Listing(
+            target_for(f"https://concurrent-{name}.example.org/product/phone"),
+            "Concurrent phone",
+            brand,
+            "mobile",
+            {"gtin13": "1234567890128"},
+            None,
+            100000,
+            0,
+            "in_stock",
+            "new",
+            "Integration seller",
+        )
+        for name in ("first", "second")
+    ]
+    with SessionLocal() as db:
+        ids = [store_listing(db, listing) for listing in listings]
+
+    def scan(index):
+        with SessionLocal() as db:
+            link_catalog_matches(db, ids[index % 2], listings[index % 2])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(scan, range(16)))
+    left, right = sorted(ids)
+    with SessionLocal() as db:
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(ProductMatch)
+                .where(
+                    ProductMatch.left_id == left,
+                    ProductMatch.right_id == right,
+                )
+            )
+            == 1
+        )

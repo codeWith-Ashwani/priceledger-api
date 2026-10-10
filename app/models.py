@@ -71,6 +71,7 @@ class Offer(Base):
     availability: Mapped[str] = mapped_column(
         String(20), default="unknown", server_default="unknown"
     )
+    rating: Mapped[dict | None] = mapped_column(JSON)
 
 
 class Observation(Base):

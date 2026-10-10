@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
+from app.config import get_settings
 from app.identity import mobile_attributes
 from app.public_http import PublicFetchError, fetch_public
 
@@ -17,6 +18,8 @@ STORES = {
     "amazon": ("Amazon", "#a86416", "https://www.amazon.in/s?"),
     "flipkart": ("Flipkart", "#316dde", "https://www.flipkart.com/search?"),
     "meesho": ("Meesho", "#aa2878", "https://www.meesho.com/search?"),
+    "croma": ("Croma", "#08776a", "https://www.croma.com/searchB?"),
+    "reliance": ("Reliance Digital", "#cf3038", "https://www.reliancedigital.in/search?"),
 }
 HOSTS = {
     "amazon.in": "amazon",
@@ -30,6 +33,10 @@ HOSTS = {
     "fkrt.it": "flipkart",
     "meesho.com": "meesho",
     "www.meesho.com": "meesho",
+    "croma.com": "croma",
+    "www.croma.com": "croma",
+    "reliancedigital.in": "reliance",
+    "www.reliancedigital.in": "reliance",
 }
 SHORT_HOSTS = {"amzn.in", "amzn.to", "fkrt.it", "dl.flipkart.com"}
 IMAGE_HOSTS = {
@@ -39,6 +46,10 @@ IMAGE_HOSTS = {
     "rukminim1.flixcart.com",
     "rukminim2.flixcart.com",
     "images.meesho.com",
+    "media-ik.croma.com",
+    "media.croma.com",
+    "www.reliancedigital.in",
+    "assets.reliancedigital.in",
 }
 
 
@@ -68,6 +79,18 @@ class Listing:
     availability: str
     condition: str
     seller: str
+    rating: dict | None = None
+
+
+def discovery_retailers(category: str | None = None) -> list[str]:
+    configured = list(dict.fromkeys(get_settings().discovery_retailers))
+    # Electronics stores are irrelevant to known fashion/grocery/beauty categories.
+    non_electronics = category and re.search(
+        r"fashion|clothing|grocery|beauty|personal-care|food", category, re.I
+    )
+    return [
+        store for store in configured if not non_electronics or store not in {"croma", "reliance"}
+    ]
 
 
 def retailer_key(host: str) -> str:
@@ -143,6 +166,20 @@ def target_for(value: str) -> Target:
         match = re.search(r"/p/([a-zA-Z0-9]+)(?:/|$)", parsed.path)
         if match:
             return Target(retailer, "https://www.meesho.com" + parsed.path.rstrip("/"), match[1])
+    elif retailer == "croma":
+        match = re.search(r"/p/(\d{4,20})(?:/|$)", parsed.path)
+        if match:
+            return Target(retailer, "https://www.croma.com" + parsed.path.rstrip("/"), match[1])
+    elif retailer == "reliance":
+        match = re.search(r"/product/([a-zA-Z0-9-]+)(?:/|$)", parsed.path)
+        legacy = re.search(r"/p/(\d{4,20})(?:/|$)", parsed.path)
+        if match or legacy:
+            identity = (match or legacy)[1]
+            return Target(
+                retailer,
+                "https://www.reliancedigital.in" + parsed.path.rstrip("/"),
+                identity[-150:],
+            )
     raise LookupError(
         "invalid_link", "This is not a supported product page. Paste the product's full link.", 400
     )
@@ -193,7 +230,7 @@ def schema_objects(value):
                 yield from schema_objects(item)
 
 
-def safe_image(value) -> str | None:
+def safe_image(value, product_host: str | None = None) -> str | None:
     if isinstance(value, list):
         value = value[0] if value else None
     if isinstance(value, dict):
@@ -202,12 +239,41 @@ def safe_image(value) -> str | None:
         parsed = urlsplit(value)
         if (
             parsed.scheme == "https"
-            and parsed.hostname in IMAGE_HOSTS
+            and (parsed.hostname in IMAGE_HOSTS or parsed.hostname == product_host)
             and not parsed.username
             and not parsed.password
         ):
             return value
     return None
+
+
+def product_rating(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        if any(
+            isinstance(value.get(key), bool) for key in ("ratingValue", "bestRating", "worstRating")
+        ):
+            return None
+        rating = Decimal(str(value.get("ratingValue")))
+        best = Decimal(str(value.get("bestRating", 5)))
+        worst = Decimal(str(value.get("worstRating", 1)))
+        if (
+            not all(number.is_finite() for number in (rating, best, worst))
+            or not 0 <= worst < best <= 100
+            or not worst <= rating <= best
+        ):
+            return None
+        count = value.get("ratingCount", value.get("reviewCount"))
+        count_text = str(count).replace(",", "")
+        count = (
+            int(count_text)
+            if count_text.isascii() and count_text.isdigit() and len(count_text) <= 9
+            else None
+        )
+        return {"value": float(rating), "best": float(best), "count": count}
+    except (ValueError, InvalidOperation):
+        return None
 
 
 def parse_listing(html: str, target: Target) -> Listing:
@@ -318,12 +384,13 @@ def parse_listing(html: str, target: Target) -> Listing:
                     str(brand)[:100] or "Brand not stated",
                     str(item.get("category", "uncategorized"))[:80],
                     attributes,
-                    safe_image(item.get("image")),
+                    safe_image(item.get("image"), urlsplit(target.url).hostname),
                     price,
                     shipping_paise,
                     availability,
                     condition,
                     str(seller)[:150],
+                    product_rating(item.get("aggregateRating")),
                 )
     if target.retailer == "amazon":
         title = soup.select_one("#productTitle")
@@ -369,6 +436,29 @@ def parse_listing(html: str, target: Target) -> Listing:
             )
             image = soup.select_one("#landingImage")
             seller = soup.select_one("#sellerProfileTriggerId")
+            rating_node = soup.select_one("#acrPopover .a-icon-alt")
+            rating_match = (
+                re.fullmatch(r"([0-9.]+) out of ([0-9.]+) stars", rating_node.get_text(strip=True))
+                if rating_node
+                else None
+            )
+            count_node = soup.select_one("#acrCustomerReviewText")
+            count_match = (
+                re.fullmatch(r"([0-9,]+) ratings?", count_node.get_text(strip=True))
+                if count_node
+                else None
+            )
+            rating = (
+                product_rating(
+                    {
+                        "ratingValue": rating_match[1],
+                        "bestRating": rating_match[2],
+                        "ratingCount": count_match[1] if count_match else None,
+                    }
+                )
+                if rating_match
+                else None
+            )
             return Listing(
                 target,
                 text,
@@ -381,6 +471,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                 state,
                 "unknown",
                 seller.get_text(" ", strip=True)[:150] if seller else "Seller not stated",
+                rating,
             )
     raise LookupError(
         "price_unavailable",

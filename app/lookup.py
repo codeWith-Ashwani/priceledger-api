@@ -18,6 +18,7 @@ from app.retail import (
     Listing,
     LookupError,
     Target,
+    discovery_retailers,
     load_listing,
     search_store,
     store_info,
@@ -77,6 +78,8 @@ def store_listing(
         )
     else:
         product.attributes = listing.attributes
+        product.title = listing.title
+        product.image_url = listing.image_url
     db.flush()
     offer = db.get(Offer, offer_id)
     if offer is None:
@@ -110,6 +113,9 @@ def store_listing(
     offer.seller = listing.seller
     offer.condition = listing.condition
     observed_at = now()
+    offer.rating = (
+        {**listing.rating, "observed_at": observed_at.isoformat()} if listing.rating else None
+    )
     ingest(
         db,
         IngestBatch(
@@ -206,7 +212,7 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
                 "Paste a full product URL or enter a brand, model and variant (up to 128 characters).",
                 400,
             )
-        permitted, limited = reserve_stores(db, list(STORES), cost=1)
+        permitted, limited = reserve_stores(db, discovery_retailers(), cost=1)
         with ThreadPoolExecutor(max_workers=3) as pool:
             stores = list(pool.map(lambda retailer: search_store(retailer, query), permitted))
         for store in stores:

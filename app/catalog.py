@@ -67,12 +67,14 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
     if not product_ids:
         return grouped
     rows = db.execute(
-        select(Offer, Retailer, Source)
-        .join(Retailer)
-        .join(Source)
+        select(Offer, Retailer, Source, Product)
+        .select_from(Offer)
+        .join(Retailer, Offer.retailer_id == Retailer.id)
+        .join(Source, Offer.source_id == Source.id)
+        .join(Product, Offer.product_id == Product.id)
         .where(Offer.product_id.in_(product_ids), *approved_sources())
     )
-    for offer, retailer, source in rows:
+    for offer, retailer, source, product in rows:
         timestamp = utc(offer.current_observed_at) if offer.current_observed_at else None
         stale = timestamp is None or timestamp < now() - timedelta(
             hours=get_settings().freshness_hours
@@ -82,6 +84,10 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
         grouped[offer.product_id].append(
             {
                 "id": offer.id,
+                "product_id": product.id,
+                "title": product.title,
+                "image_url": product.image_url,
+                "rating": offer.rating,
                 "retailer_id": retailer.id,
                 "retailer_name": retailer.name,
                 "color": retailer.color,
