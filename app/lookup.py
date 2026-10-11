@@ -1,6 +1,7 @@
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -134,7 +135,7 @@ def store_listing(
             observations=[
                 ObservationInput(
                     offer_id=offer_id,
-                    external_event_id=f"{target.external_id}:{observed_at.isoformat()}",
+                    external_event_id="page-check:" + uuid4().hex,
                     observed_at=observed_at,
                     variant_attributes=product.attributes,
                     item_paise=listing.item_paise,

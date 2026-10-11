@@ -539,3 +539,65 @@ def test_postgres_concurrent_learning_cannot_exceed_registry_capacity():
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(DiscoveryStore)) == 64
         assert all(db.get(Product, product_id) is not None for product_id in ids)
+
+
+def test_postgres_streamed_catalog_matching_preserves_every_batch():
+    from sqlalchemy import select
+
+    from app.comparison import link_catalog_matches, model_offers
+    from app.lookup import store_listing
+    from app.models import ProductMatch
+    from app.retail import target_for
+
+    # Exercise server-side cursor reads together with nested identity-link writes.
+    anchor = Listing(
+        target_for("https://coverage-anchor.example.org/products/contract"),
+        "Coverage Integration Headphones Blue",
+        "Coverage Integration",
+        "electronics",
+        {"model": "WH-520", "color": "Blue", "gtin13": "4006381333931"},
+        None,
+        100000,
+        0,
+        "in_stock",
+        "new",
+        "Integration seller",
+    )
+    with SessionLocal() as db:
+        anchor_id = store_listing(db, anchor)
+        ids = {
+            store_listing(
+                db,
+                replace(
+                    anchor,
+                    target=target_for(
+                        f"https://coverage-store-{index}.example.org/products/contract"
+                    ),
+                ),
+                commit=False,
+                manage_job=False,
+            )
+            for index in range(105)
+        }
+        db.commit()
+        link_catalog_matches(db, anchor_id, anchor)
+        pairs = list(
+            db.scalars(
+                select(ProductMatch).where(
+                    (ProductMatch.left_id == anchor_id) | (ProductMatch.right_id == anchor_id)
+                )
+            )
+        )
+        assert len(pairs) == 105
+        assert {
+            pair.right_id if pair.left_id == anchor_id else pair.left_id for pair in pairs
+        } == ids
+        red = replace(
+            anchor,
+            target=target_for("https://coverage-red.example.org/products/contract"),
+            title="Coverage Integration Headphones Red",
+            attributes={**anchor.attributes, "color": "Red"},
+        )
+        red_id = store_listing(db, red)
+        offers = model_offers(db, red_id, red)
+        assert {offer["product_id"] for offer in offers} == ids | {anchor_id}

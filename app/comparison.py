@@ -34,7 +34,7 @@ router = APIRouter(prefix="/api/v1")
 
 def link_catalog_matches(db: Session, product_id: str, anchor: Listing):
     # Any previously tracked public retailer can participate, even without a
-    # search adapter. Limit the candidate set and still require exact identity.
+    # search adapter. Stream candidates and still require exact identity.
     rows = db.execute(
         select(Product, Offer)
         .select_from(Offer)
@@ -48,9 +48,9 @@ def link_catalog_matches(db: Session, product_id: str, anchor: Listing):
             Offer.product_url.is_not(None),
             *approved_sources(),
         )
-        .order_by(Offer.current_observed_at.desc())
-        .limit(100)
-    ).all()
+        .order_by(Offer.id)
+        .execution_options(yield_per=100)
+    )
     for product, offer in rows:
         try:
             candidate = listing_from_record(product, offer)
@@ -151,9 +151,9 @@ def model_offers(db: Session, product_id: str, anchor: Listing) -> list[dict]:
             Offer.product_url.is_not(None),
             *approved_sources(),
         )
-        .order_by(Offer.current_observed_at.desc())
-        .limit(100)
-    ).all()
+        .order_by(Offer.id)
+        .execution_options(yield_per=100)
+    )
     decisions = {}
     for product, offer in rows:
         try:
@@ -162,12 +162,17 @@ def model_offers(db: Session, product_id: str, anchor: Listing) -> list[dict]:
             continue
         if decision["status"] == "model_match":
             decisions[product.id] = decision
-    grouped = offers_for(db, list(decisions))
-    return [
-        {**offer, "match_scope": "model", "differences": decisions[member]["differences"]}
-        for member, offers in grouped.items()
-        for offer in offers
-    ]
+    # Batch database parameters, not result coverage: retain every matched offer.
+    members = list(decisions)
+    result = []
+    for offset in range(0, len(members), 100):
+        grouped = offers_for(db, members[offset : offset + 100])
+        result.extend(
+            {**offer, "match_scope": "model", "differences": decisions[member]["differences"]}
+            for member, offers in grouped.items()
+            for offer in offers
+        )
+    return result
 
 
 def discover_store(
@@ -212,7 +217,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     ]
     if (
         existing
-        and existing.result.get("discovery_version") == 10
+        and existing.result.get("discovery_version") == 11
         and existing.result.get("discovery_retailers") == selected
         and utc(existing.checked_at) > now() - timedelta(minutes=15)
     ):
@@ -414,7 +419,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
             "source_ids": sorted(source_ids),
             "discovery_retailers": retailers,
-            "discovery_version": 10,
+            "discovery_version": 11,
             "model_offers": model_offers(db, product_id, anchor),
         }
     )

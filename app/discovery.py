@@ -72,7 +72,7 @@ def learn_store(db: Session, listing: Listing):
 
 def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
     limit = get_settings().discovery_extra_store_limit
-    if not limit:
+    if limit == 0:
         return {}
     rows = db.scalars(
         select(DiscoveryStore)
@@ -99,12 +99,16 @@ def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
         except LookupError:
             continue
         result[store.retailer_id] = {"name": store_info(target_for(base))[0], "search_base": base}
-        if len(result) == limit:
+        if limit > 0 and len(result) == limit:
             break
     # Start discovery at a small, brand-scoped set of readable public catalogs.
     # Never override an operator pause, revoked source or expired permission.
     for host, (name, store_brand) in SHOPIFY_ORIGINS.items():
-        if len(result) >= limit or not brand or brand.lower() != store_brand.lower():
+        if (
+            (limit > 0 and len(result) >= limit)
+            or not brand
+            or brand.lower() != store_brand.lower()
+        ):
             continue
         base = f"https://{'www.' if host == 'imagineonline.store' else ''}{host}/search?"
         target = target_for(base)
