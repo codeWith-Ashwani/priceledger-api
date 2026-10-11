@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.catalog import approved_sources, get_product, offers_for
 from app.collection import record_attempt, reserve_requests
+from app.config import get_settings
 from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
 from app.discovery import registered_stores
@@ -30,6 +31,7 @@ from app.retail import (
 )
 
 router = APIRouter(prefix="/api/v1")
+DISCOVERY_VERSION = 12
 
 
 def link_catalog_matches(db: Session, product_id: str, anchor: Listing):
@@ -184,9 +186,9 @@ def discover_store(
     candidates = []
     failures = []
     failed_checks = []
-    # Bounded verification: read at most two exact search candidates from each store.
+    # Verification bounds and source reservations use the same configured limit.
     ranked = sorted(result["items"], key=lambda item: candidate_priority(item, expected or {}))
-    for item in ranked[:2]:
+    for item in ranked[: get_settings().discovery_candidates_per_store]:
         started_at = now()
         try:
             candidates.append(load_listing(target_for(item["url"])))
@@ -204,6 +206,7 @@ def discover_store(
 
 
 def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = None) -> dict:
+    settings = get_settings()
     product = get_product(db, product_id)
     existing = db.get(ComparisonScan, product_id)
     anchor_retailers = set(
@@ -217,9 +220,10 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     ]
     if (
         existing
-        and existing.result.get("discovery_version") == 11
+        and existing.result.get("discovery_version") == DISCOVERY_VERSION
+        and existing.result.get("candidates_per_store") == settings.discovery_candidates_per_store
         and existing.result.get("discovery_retailers") == selected
-        and utc(existing.checked_at) > now() - timedelta(minutes=15)
+        and utc(existing.checked_at) > now() - timedelta(minutes=settings.comparison_cache_minutes)
     ):
         # Revoked sources must not leak cached prices or verified links.
         source_ids = existing.result.get("source_ids", [])
@@ -274,9 +278,11 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             db.rollback()
     query = discovery_query(anchor)
     retailers = selected
-    # Reserve one search and up to two page reads per store before parallel discovery.
-    permitted, limited = reserve_stores(db, retailers, cost=3, custom=custom)
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    # Reserve the search and every possible candidate read before parallel work.
+    permitted, limited = reserve_stores(
+        db, retailers, cost=1 + settings.discovery_candidates_per_store, custom=custom
+    )
+    with ThreadPoolExecutor(max_workers=settings.discovery_workers) as pool:
         discoveries = list(
             pool.map(
                 lambda retailer: (
@@ -419,7 +425,8 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
             "source_ids": sorted(source_ids),
             "discovery_retailers": retailers,
-            "discovery_version": 11,
+            "discovery_version": DISCOVERY_VERSION,
+            "candidates_per_store": settings.discovery_candidates_per_store,
             "model_offers": model_offers(db, product_id, anchor),
         }
     )

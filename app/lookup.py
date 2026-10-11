@@ -232,7 +232,7 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
         permitted, limited = reserve_stores(
             db, [*discovery_retailers(), *custom], cost=1, custom=custom
         )
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=get_settings().discovery_workers) as pool:
             stores = list(
                 pool.map(
                     lambda retailer: (

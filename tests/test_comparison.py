@@ -3,7 +3,8 @@ from dataclasses import replace
 import pytest
 from sqlalchemy import func, select
 
-from app.comparison import scan_comparison
+from app.comparison import discover_store, scan_comparison
+from app.config import get_settings
 from app.identity import match_variant, mobile_attributes, valid_gtin
 from app.lookup import store_listing
 from app.models import Observation, ProductMatch, Source
@@ -47,6 +48,52 @@ def discovery(listing):
         "listings": [listing],
         "failures": [],
     }
+
+
+@pytest.mark.parametrize("maximum", [1, 3])
+def test_candidate_verification_reads_only_the_configured_number(monkeypatch, pair, maximum):
+    _, listing = pair
+    monkeypatch.setattr(get_settings(), "discovery_candidates_per_store", maximum)
+    urls = [f"https://www.amazon.in/dp/B01234567{index}" for index in range(4)]
+    monkeypatch.setattr(
+        "app.comparison.search_store",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "items": [{"title": "Contract phone", "url": url} for url in urls],
+        },
+    )
+    fetched = []
+
+    def load(target):
+        fetched.append(target.url)
+        return listing
+
+    monkeypatch.setattr("app.comparison.load_listing", load)
+    assert len(discover_store("amazon", "Contract phone")["listings"]) == maximum
+    assert len(fetched) == maximum
+
+
+def test_candidate_configuration_updates_reservations_and_invalidates_cached_scans(
+    db, monkeypatch, pair
+):
+    left, right = pair
+    product_id = store_listing(db, left)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "discovery_retailers", ["amazon"])
+    monkeypatch.setattr(settings, "discovery_candidates_per_store", 1)
+    costs = []
+
+    def reserve(_db, retailers, *, cost, custom):
+        costs.append(cost)
+        return retailers, {}
+
+    monkeypatch.setattr("app.comparison.reserve_stores", reserve)
+    monkeypatch.setattr("app.comparison.discover_store", lambda *args, **kwargs: discovery(right))
+    assert not scan_comparison(db, product_id)["cached"]
+    assert scan_comparison(db, product_id)["cached"]
+    monkeypatch.setattr(settings, "discovery_candidates_per_store", 4)
+    assert not scan_comparison(db, product_id)["cached"]
+    assert costs == [2, 5]
 
 
 def test_matching_phone_requires_same_ram_color_storage_and_condition(pair):

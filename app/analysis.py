@@ -1,37 +1,48 @@
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from statistics import median
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.catalog import approved_sources, comparison_offers, get_product
+from app.catalog import comparison_offers, get_product
 from app.db import get_db, now, utc
+from app.evidence import INDIA, daily_evidence, observation_rows
 from app.limits import read_limit
-from app.models import Observation, Offer, Source
+from app.models import Offer
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(read_limit)])
+REFERENCE_DAYS = 30
+RECENT_EXCLUDED_DAYS = 7
+MIN_REFERENCE_DAYS = 20
+HISTORY_DAYS = 365
+RECENT_PATTERN_DAYS = 14
+SIGNIFICANT_SAVING_PERCENT = 5
+RISE_THRESHOLD_RATIO = 1.10
 
 
 def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: datetime) -> dict:
-    reference_start, reference_end = at - timedelta(days=37), at - timedelta(days=7)
+    reference_end = at - timedelta(days=RECENT_EXCLUDED_DAYS)
+    reference_start = reference_end - timedelta(days=REFERENCE_DAYS)
     daily: dict[str, list[int]] = defaultdict(list)
     for observed_at, amount in points:
         if reference_start <= observed_at < reference_end:
-            daily[
-                utc(observed_at)
-                .astimezone(timezone(timedelta(hours=5, minutes=30)))
-                .date()
-                .isoformat()
-            ].append(amount)
+            daily[utc(observed_at).astimezone(INDIA).date().isoformat()].append(amount)
     baseline = (
-        round(median([median(values) for values in daily.values()])) if len(daily) >= 20 else None
+        round(median([median(values) for values in daily.values()]))
+        if len(daily) >= MIN_REFERENCE_DAYS
+        else None
     )
     valid_points = [
-        amount for timestamp, amount in points if at - timedelta(days=365) <= timestamp <= at
+        amount
+        for timestamp, amount in points
+        if at - timedelta(days=HISTORY_DAYS) <= timestamp <= at
     ]
-    recent = [amount for timestamp, amount in points if at - timedelta(days=14) <= timestamp <= at]
+    recent = [
+        amount
+        for timestamp, amount in points
+        if at - timedelta(days=RECENT_PATTERN_DAYS) <= timestamp <= at
+    ]
     saving = (
         round((baseline - current_paise) / baseline * 100, 1)
         if baseline and current_paise is not None
@@ -42,12 +53,18 @@ def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: da
         baseline is not None
         and recent_high is not None
         and current_paise is not None
-        and recent_high >= baseline * 1.10
+        and recent_high >= baseline * RISE_THRESHOLD_RATIO
         and current_paise < recent_high
     )
     verdict = "insufficient_history"
     if saving is not None:
-        verdict = "below_usual" if saving >= 5 else "above_usual" if saving <= -5 else "near_usual"
+        verdict = (
+            "below_usual"
+            if saving >= SIGNIFICANT_SAVING_PERCENT
+            else "above_usual"
+            if saving <= -SIGNIFICANT_SAVING_PERCENT
+            else "near_usual"
+        )
     return {
         "verdict": verdict,
         "current_paise": current_paise,
@@ -58,12 +75,12 @@ def assess(points: list[tuple[datetime, int]], current_paise: int | None, at: da
         "recent_high_paise": recent_high,
         "recent_rise_then_drop": recent_rise,
         "reference_days_observed": len(daily),
-        "reference_days_required": 20,
+        "reference_days_required": MIN_REFERENCE_DAYS,
         "reference_start": reference_start,
         "reference_end": reference_end,
-        "method": "Median of daily observed delivered prices over 30 days ending 7 days ago",
+        "method": f"Median of daily observed delivered prices over {REFERENCE_DAYS} days ending {RECENT_EXCLUDED_DAYS} days ago",
         "algorithm_version": "daily-median-v3-source-ist",
-        "history_window_days": 365,
+        "history_window_days": HISTORY_DAYS,
     }
 
 
@@ -74,26 +91,21 @@ def assessment(product_id: str, db: Session = Depends(get_db)):
     eligible = [
         offer
         for offer in offers
-        if offer["in_stock"] and not offer["stale"] and offer["total_paise"] is not None
+        if offer["channel"] == "online"
+        and offer["in_stock"]
+        and not offer["stale"]
+        and offer["total_paise"] is not None
     ]
     best = min(eligible, key=lambda offer: offer["total_paise"], default=None)
     points = []
     latest = None
+    at = now()
     if best:
-        observations = list(
-            db.scalars(
-                select(Observation)
-                .join(Source)
-                .where(
-                    Observation.offer_id == best["id"],
-                    Observation.observed_at >= now() - timedelta(days=365),
-                    Observation.observed_at <= now(),
-                    *approved_sources(),
-                )
-                .order_by(Observation.observed_at)
-            )
-        )
         tracked = db.get(Offer, best["id"])
+        rows = observation_rows(
+            db, [tracked.product_id], at - timedelta(days=HISTORY_DAYS), at, offer_id=tracked.id
+        )
+        observations = [row[0] for row in rows]
         latest = next(
             (
                 observation
@@ -104,39 +116,8 @@ def assessment(product_id: str, db: Session = Depends(get_db)):
             ),
             None,
         )
-        # Select one evidence source per India day: own observations take priority,
-        # then a deterministic approved archive. Overlapping feeds cannot overweight a day.
-        by_day: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-        for observation in observations:
-            if observation.price_type != "listing":
-                continue
-            if observation.evidence_kind == "historical_import" and (
-                not observation.context_snapshot
-                or any(
-                    observation.context_snapshot.get(key) != getattr(tracked, key)
-                    for key in ("seller", "condition", "region")
-                )
-            ):
-                continue
-            if (
-                observation.in_stock
-                and observation.item_paise is not None
-                and observation.shipping_paise is not None
-            ):
-                timestamp = utc(observation.observed_at)
-                day = (
-                    timestamp.astimezone(timezone(timedelta(hours=5, minutes=30)))
-                    .date()
-                    .isoformat()
-                )
-                by_day[day][observation.source_id].append(
-                    (timestamp, observation.item_paise + observation.shipping_paise)
-                )
-        points = []
-        for evidence in by_day.values():
-            chosen = tracked.source_id if tracked.source_id in evidence else min(evidence)
-            points.extend(evidence[chosen])
-    result = assess(points, best["total_paise"] if best else None, now())
+        points = [(record.at, record.price_paise) for record in daily_evidence(rows, "delivered")]
+    result = assess(points, best["total_paise"] if best else None, at)
     result.update(
         {
             "history_source_policy": "One source per India day: own checks first, otherwise approved source ID order",

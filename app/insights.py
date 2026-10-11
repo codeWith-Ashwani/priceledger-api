@@ -1,50 +1,37 @@
 """Recorded exact-variant statistics; no inferred prices or purchase predictions."""
 
 from collections import defaultdict
-from datetime import timedelta, timezone
+from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.catalog import comparison_offers, history
-from app.db import get_db, utc
+from app.catalog import comparison_offers, get_product
+from app.db import get_db, now
+from app.evidence import INDIA, RecordedPrice, daily_evidence, observation_rows
+from app.groups import member_ids
 from app.limits import read_limit
-from app.models import Offer
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(read_limit)])
-INDIA = timezone(timedelta(hours=5, minutes=30))
 
 
-def summarize(recorded: dict, own_sources: dict[str, str], current: dict | None) -> dict:
-    by_day = defaultdict(lambda: defaultdict(list))
-    for series in recorded["series"]:
-        if series["channel"] != "online" or series["price_type"] != "listing":
-            continue
-        for point in series["points"]:
-            price = point["price_paise"]
-            if not point["in_stock"] or price is None:
-                continue
-            at = utc(point["at"])
-            key = (at.astimezone(INDIA).date().isoformat(), series["offer_id"])
-            by_day[key][series["source_id"]].append(
-                {
-                    "price_paise": price,
-                    "observed_at": at,
-                    "retailer_name": series["name"],
-                    "source_name": series["source_name"],
-                    "offer_id": series["offer_id"],
-                }
-            )
-    selected = []
+def summarize(
+    records: list[RecordedPrice], product_id: str, days: int, basis: str, current: dict | None
+) -> dict:
     daily = defaultdict(list)
-    for (day, offer_id), sources in by_day.items():
-        own = own_sources.get(offer_id)
-        chosen = own if own in sources else min(sources)
-        points = sources[chosen]
-        selected.extend(points)
-        daily[day].extend(point["price_paise"] for point in points)
+    selected = []
+    for record in records:
+        daily[record.at.astimezone(INDIA).date()].append(record.price_paise)
+        selected.append(
+            {
+                "price_paise": record.price_paise,
+                "observed_at": record.at,
+                "retailer_name": record.retailer_name,
+                "source_name": record.source_name,
+                "offer_id": record.offer_id,
+            }
+        )
     daily_lows = [min(prices) for prices in daily.values()]
     count = len(daily_lows)
     low = min(
@@ -54,10 +41,10 @@ def summarize(recorded: dict, own_sources: dict[str, str], current: dict | None)
         selected, key=lambda point: (-point["price_paise"], point["observed_at"]), default=None
     )
     return {
-        "product_id": recorded["product_id"],
-        "days": recorded["days"],
+        "product_id": product_id,
+        "days": days,
         "scope": "exact_variant",
-        "price_basis": recorded["price_basis"],
+        "price_basis": basis,
         "low": low,
         "high": high,
         "current": current,
@@ -82,31 +69,14 @@ def insights(
     basis: Literal["item", "delivered"] = "item",
     db: Session = Depends(get_db),
 ):
-    recorded = history(product_id, days=days, basis=basis, db=db)
-    ids = list({series["offer_id"] for series in recorded["series"]})
-    own_sources = {}
-    tracked = {}
-    for offset in range(0, len(ids), 100):
-        for offer in db.scalars(select(Offer).where(Offer.id.in_(ids[offset : offset + 100]))):
-            own_sources[offer.id] = offer.source_id
-            tracked[offer.id] = offer
-    for series in recorded["series"]:
-        offer = tracked[series["offer_id"]]
-        series["points"] = [
-            point
-            for point in series["points"]
-            if point["evidence_kind"] != "historical_import"
-            or (
-                point["context_snapshot"]
-                and all(
-                    point["context_snapshot"].get(key) == getattr(offer, key)
-                    for key in ("seller", "condition", "region")
-                )
-            )
-        ]
+    get_product(db, product_id)
+    members = member_ids(db, product_id)
+    at = now()
+    rows = observation_rows(db, members, at - timedelta(days=days), at)
+    records = daily_evidence(rows, basis)
     eligible = [
         offer
-        for offer in comparison_offers(db, product_id)
+        for offer in comparison_offers(db, product_id, members=members)
         if offer["channel"] == "online"
         and offer["in_stock"]
         and not offer["stale"]
@@ -128,4 +98,4 @@ def insights(
         if best
         else None
     )
-    return summarize(recorded, own_sources, current)
+    return summarize(records, product_id, days, basis, current)

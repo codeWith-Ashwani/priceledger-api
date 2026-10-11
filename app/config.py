@@ -25,6 +25,11 @@ class Settings(BaseSettings):
         "boat",
     ]
     lookup_cache_minutes: int = Field(default=15, ge=1, le=1440)
+    comparison_cache_minutes: int = Field(default=15, ge=1, le=1440)
+    discovery_workers: int = Field(default=3, ge=1, le=8)
+    discovery_candidates_per_store: int = Field(default=2, ge=1, le=5)
+    discovery_registry_capacity: int = Field(default=64, ge=1, le=1000)
+    discovery_brands_per_store: int = Field(default=32, ge=1, le=256)
     discovery_extra_store_limit: int = Field(default=-1, ge=-1)
     lookup_requests_per_minute: int = Field(default=12, ge=1, le=1000)
     read_requests_per_minute: int = Field(default=120, ge=1, le=10_000)

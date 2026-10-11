@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db, now, utc
+from app.evidence import approved_sources as approved_sources
+from app.evidence import observation_rows
 from app.groups import member_ids
 from app.limits import read_limit
 from app.models import (
@@ -21,16 +23,6 @@ from app.models import (
 )
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(read_limit)])
-
-
-def approved_sources():
-    conditions = [
-        Source.history_allowed.is_(True),
-        Source.display_allowed.is_(True),
-        (Source.expires_at.is_(None) | (Source.expires_at > now())),
-    ]
-    conditions.append(Source.kind != "demo")
-    return conditions
 
 
 def product_json(product: Product, offers: list[dict]) -> dict:
@@ -66,19 +58,19 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = {product_id: [] for product_id in product_ids}
     if not product_ids:
         return grouped
+    at = now()
+    fresh_since = at - timedelta(hours=get_settings().freshness_hours)
     rows = db.execute(
         select(Offer, Retailer, Source, Product)
         .select_from(Offer)
         .join(Retailer, Offer.retailer_id == Retailer.id)
         .join(Source, Offer.source_id == Source.id)
         .join(Product, Offer.product_id == Product.id)
-        .where(Offer.product_id.in_(product_ids), *approved_sources())
+        .where(Offer.product_id.in_(product_ids), *approved_sources(at))
     )
     for offer, retailer, source, product in rows:
         timestamp = utc(offer.current_observed_at) if offer.current_observed_at else None
-        stale = timestamp is None or timestamp < now() - timedelta(
-            hours=get_settings().freshness_hours
-        )
+        stale = timestamp is None or timestamp < fresh_since or timestamp > at
         item, shipping = offer.current_item_paise, offer.current_shipping_paise
         total = item + shipping if item is not None and shipping is not None else None
         grouped[offer.product_id].append(
@@ -172,8 +164,10 @@ def get_product(db: Session, product_id: str) -> Product:
     return product
 
 
-def comparison_offers(db: Session, product_id: str) -> list[dict]:
-    members = member_ids(db, product_id)
+def comparison_offers(
+    db: Session, product_id: str, *, members: list[str] | None = None
+) -> list[dict]:
+    members = members if members is not None else member_ids(db, product_id)
     grouped = offers_for(db, members)
     return [offer for member in members for offer in grouped[member]]
 
@@ -182,7 +176,7 @@ def comparison_offers(db: Session, product_id: str) -> list[dict]:
 def detail(product_id: str, db: Session = Depends(get_db)):
     product = get_product(db, product_id)
     members = member_ids(db, product_id)
-    offers = comparison_offers(db, product_id)
+    offers = comparison_offers(db, product_id, members=members)
     first_seen = db.scalar(
         select(func.min(Observation.observed_at))
         .select_from(Observation)
@@ -207,28 +201,11 @@ def history(
     db: Session = Depends(get_db),
 ):
     get_product(db, product_id)
-    start = now() - timedelta(days=days)
+    at = now()
+    start = at - timedelta(days=days)
     members = member_ids(db, product_id)
     maximum = get_settings().max_history_observations
-    rows = db.execute(
-        select(Observation, Offer, Retailer, Source)
-        .select_from(Observation)
-        .join(Offer, Observation.offer_id == Offer.id)
-        .join(Retailer, Offer.retailer_id == Retailer.id)
-        .join(Source, Observation.source_id == Source.id)
-        .where(
-            Offer.product_id.in_(members),
-            Observation.observed_at >= start,
-            Observation.observed_at <= now(),
-            *approved_sources(),
-        )
-        .order_by(Observation.observed_at, Observation.id)
-        .limit(maximum + 1)
-    ).all()
-    if len(rows) > maximum:
-        raise HTTPException(
-            422, "This history range has too many observations. Choose a shorter period."
-        )
+    rows = observation_rows(db, members, start, at)
     series = {}
     failures: dict[str, list] = {}
     failed_rows = db.execute(
@@ -241,7 +218,8 @@ def history(
             Offer.product_id.in_(members),
             CollectionAttempt.outcome == "failure",
             CollectionAttempt.started_at >= start,
-            *approved_sources(),
+            CollectionAttempt.started_at <= at,
+            *approved_sources(at),
         )
         .order_by(CollectionAttempt.started_at, CollectionAttempt.id)
         .limit(maximum + 1)
@@ -318,6 +296,7 @@ def history(
 def coverage(product_id: str, db: Session = Depends(get_db)):
     get_product(db, product_id)
     members = member_ids(db, product_id)
+    at = now()
     # Count observed calendar days in India, without loading every historical quote.
     day = (
         cast(func.timezone("Asia/Kolkata", Observation.observed_at), Date)
@@ -335,7 +314,7 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
         )
         .join(Offer, Observation.offer_id == Offer.id)
         .join(Source, Observation.source_id == Source.id)
-        .where(Offer.product_id.in_(members), Observation.observed_at <= now(), *approved_sources())
+        .where(Offer.product_id.in_(members), Observation.observed_at <= at, *approved_sources(at))
         .group_by(Observation.offer_id)
     )
     counts = {row[0]: row[1:] for row in aggregates}
@@ -344,13 +323,13 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
         select(Observation.offer_id, Source.id, Source.name, func.count(Observation.id))
         .join(Offer, Observation.offer_id == Offer.id)
         .join(Source, Observation.source_id == Source.id)
-        .where(Offer.product_id.in_(members), Observation.observed_at <= now(), *approved_sources())
+        .where(Offer.product_id.in_(members), Observation.observed_at <= at, *approved_sources(at))
         .group_by(Observation.offer_id, Source.id, Source.name)
     ):
         history_sources.setdefault(offer_id, []).append(
             {"source_id": source_id, "name": source_name, "observations": count}
         )
-    offers = comparison_offers(db, product_id)
+    offers = comparison_offers(db, product_id, members=members)
     included = {offer["id"] for offer in offers}
     for offer, retailer in db.execute(
         select(Offer, Retailer)
@@ -365,33 +344,58 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
                 "channel": offer.channel,
             }
         )
+    # Fetch operational state once for the group instead of three reads per offer.
+    operational = {
+        record.id: (job, budget)
+        for record, job, budget in db.execute(
+            select(Offer, CollectionJob, CollectionBudget)
+            .outerjoin(CollectionJob, CollectionJob.offer_id == Offer.id)
+            .outerjoin(CollectionBudget, CollectionBudget.source_id == Offer.source_id)
+            .where(Offer.product_id.in_(members))
+        )
+    }
+    # One indexed lookup per offer inside a single SQL statement avoids both
+    # Python N+1 reads and ranking every old attempt in a dense history.
+    latest_attempt_id = (
+        select(CollectionAttempt.id)
+        .join(Source, CollectionAttempt.source_id == Source.id)
+        .where(
+            CollectionAttempt.offer_id == Offer.id,
+            CollectionAttempt.outcome != "running",
+            CollectionAttempt.started_at <= at,
+            *approved_sources(at),
+        )
+        .order_by(CollectionAttempt.started_at.desc(), CollectionAttempt.id.desc())
+        .limit(1)
+        .correlate(Offer)
+        .scalar_subquery()
+    )
+    last_checks = {
+        offer_id: check
+        for offer_id, check in db.execute(
+            select(Offer.id, CollectionAttempt)
+            .select_from(Offer)
+            .join(CollectionAttempt, CollectionAttempt.id == latest_attempt_id)
+            .where(Offer.product_id.in_(members))
+        )
+    }
     items = []
     for offer in offers:
         count, first, last, days, imported = counts.get(offer["id"], (0, None, None, 0, 0))
-        job = db.get(CollectionJob, offer["id"])
-        record = db.get(Offer, offer["id"])
+        job, budget = operational[offer["id"]]
         if offer["id"] not in included:
             job = None
-        budget = db.get(CollectionBudget, record.source_id)
-        last_check = db.scalar(
-            select(CollectionAttempt)
-            .where(
-                CollectionAttempt.offer_id == offer["id"],
-                CollectionAttempt.outcome != "running",
-            )
-            .order_by(CollectionAttempt.started_at.desc(), CollectionAttempt.id.desc())
-            .limit(1)
-        )
+        last_check = last_checks.get(offer["id"])
         eligible = utc(job.next_run_at) if job and job.status == "queued" else None
         if eligible and budget:
             if budget.blocked_until:
                 eligible = max(eligible, utc(budget.blocked_until))
-            if budget.budget_day == now().date().isoformat() and (
+            if budget.budget_day == at.date().isoformat() and (
                 budget.reserved_requests >= get_settings().collection_daily_budget
             ):
                 eligible = max(
                     eligible,
-                    now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1),
+                    at.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1),
                 )
         items.append(
             {
@@ -409,7 +413,7 @@ def coverage(product_id: str, db: Session = Depends(get_db)):
                 if job
                 and job.status == "running"
                 and job.lease_expires_at
-                and utc(job.lease_expires_at) <= now()
+                and utc(job.lease_expires_at) <= at
                 else job.status
                 if job
                 else "not_scheduled",

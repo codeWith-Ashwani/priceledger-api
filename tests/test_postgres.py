@@ -601,3 +601,16 @@ def test_postgres_streamed_catalog_matching_preserves_every_batch():
         red_id = store_listing(db, red)
         offers = model_offers(db, red_id, red)
         assert {offer["product_id"] for offer in offers} == ids | {anchor_id}
+        from app.catalog import coverage
+        from app.insights import insights
+
+        recorded = coverage(anchor_id, db)
+        assert len(recorded["stores"]) == 106
+        assert all(store["observations"] == 1 for store in recorded["stores"])
+        anchor_check = next(
+            store for store in recorded["stores"] if store["offer_id"] == anchor_id + ":public-page"
+        )
+        assert anchor_check["last_check"]["outcome"] == "success"
+        statistics = insights(anchor_id, days=90, basis="item", db=db)
+        assert statistics["observations"] == 106
+        assert statistics["low"]["price_paise"] == 100000

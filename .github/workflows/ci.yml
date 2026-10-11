@@ -17,6 +17,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run ruff check app tests
+      - run: uv run ruff format --check app tests
       - run: uv run alembic upgrade head
       - run: uv run alembic check
       - run: uv run pytest -q

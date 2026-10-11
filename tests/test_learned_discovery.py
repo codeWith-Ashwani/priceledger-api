@@ -90,6 +90,27 @@ def test_non_shopify_and_missing_brands_never_learn(db):
     assert not registered_stores(db)
 
 
+def test_configured_learning_capacity_never_hides_already_registered_stores(db, monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "discovery_registry_capacity", 2)
+    monkeypatch.setattr(settings, "discovery_brands_per_store", 1)
+    first = listing()
+    second = replace(
+        first, target=target_for(first.target.url.replace("shop.example.org", "second.example.org"))
+    )
+    third = replace(
+        first, target=target_for(first.target.url.replace("shop.example.org", "third.example.org"))
+    )
+    store_listing(db, first)
+    store_listing(db, second)
+    monkeypatch.setattr(settings, "discovery_registry_capacity", 1)
+    store_listing(db, third)
+    learn_store(db, replace(first, brand="Another brand"))
+    db.commit()
+    assert set(registered_stores(db)) == {first.target.retailer, second.target.retailer}
+    assert db.get(DiscoveryStore, first.target.retailer).brands == ["Test"]
+
+
 def test_persisted_host_is_revalidated(db):
     value = listing()
     store_listing(db, value)

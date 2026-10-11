@@ -1,39 +1,39 @@
 from datetime import UTC, datetime, timedelta
 
 from app.db import now
+from app.evidence import daily_evidence
 from app.insights import summarize
-from app.models import Observation, Offer, Source
+from app.models import Observation, Offer, Retailer, Source
 
 
 def series(points, *, source="own", channel="online", price_type="listing", offer="a"):
-    return {
-        "channel": channel,
-        "price_type": price_type,
-        "source_id": source,
-        "offer_id": offer,
-        "name": offer,
-        "source_name": source,
-        "points": [
-            {"at": at, "price_paise": price, "in_stock": price is not None} for at, price in points
-        ],
-    }
+    return [
+        (
+            Observation(
+                observed_at=at,
+                item_paise=price,
+                in_stock=price is not None,
+                evidence_kind="recorded",
+                price_type=price_type,
+            ),
+            Offer(id=offer, source_id="own", channel=channel),
+            Retailer(name=offer),
+            Source(id=source, name=source),
+        )
+        for at, price in points
+    ]
 
 
 def test_daily_best_average_is_not_biased_by_poll_frequency_and_uses_india_days():
     at = datetime(2026, 10, 1, 18, 29, tzinfo=UTC)
-    data = {
-        "product_id": "p",
-        "days": 30,
-        "price_basis": "item",
-        "series": [
-            series([(at, 100), (at + timedelta(minutes=1), 300), (at + timedelta(minutes=2), 500)]),
-            series([(at, 1)], source="archive"),
-            series([(at, 200)], offer="b"),
-            series([(at, 1)], channel="offline"),
-            series([(at, 1)], price_type="coupon"),
-        ],
-    }
-    result = summarize(data, {"a": "own"}, None)
+    rows = [
+        *series([(at, 100), (at + timedelta(minutes=1), 300), (at + timedelta(minutes=2), 500)]),
+        *series([(at, 1)], source="archive"),
+        *series([(at, 200)], offer="b"),
+        *series([(at, 1)], channel="offline"),
+        *series([(at, 1)], price_type="coupon"),
+    ]
+    result = summarize(daily_evidence(rows, "item"), "p", 30, "item", None)
     assert result["observed_days"] == 2
     assert result["daily_average_paise"] == 200
     assert result["low"]["price_paise"] == 100

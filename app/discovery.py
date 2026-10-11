@@ -44,7 +44,10 @@ def learn_store(db: Session, listing: Listing):
             text("SELECT pg_try_advisory_xact_lock(1886156147, 12)")
         ):
             return
-        if db.scalar(select(func.count()).select_from(DiscoveryStore)) >= 64:
+        if (
+            db.scalar(select(func.count()).select_from(DiscoveryStore))
+            >= get_settings().discovery_registry_capacity
+        ):
             return
     insert_missing(
         db,
@@ -65,7 +68,7 @@ def learn_store(db: Session, listing: Listing):
     if (
         store.enabled
         and brand.lower() not in {item.lower() for item in store.brands}
-        and len(store.brands) < 32
+        and len(store.brands) < get_settings().discovery_brands_per_store
     ):
         store.brands = [*store.brands, brand]
 
@@ -85,7 +88,6 @@ def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
             Source.expires_at.is_(None) | (Source.expires_at > now()),
         )
         .order_by(DiscoveryStore.learned_at.desc(), DiscoveryStore.retailer_id)
-        .limit(64)
     )
     result = {}
     for store in rows:
@@ -129,10 +131,7 @@ def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
 @router.get("")
 def stores(db: Session = Depends(get_db)):
     rows = db.execute(
-        select(DiscoveryStore, Source)
-        .join(Source)
-        .order_by(DiscoveryStore.learned_at.desc())
-        .limit(64)
+        select(DiscoveryStore, Source).join(Source).order_by(DiscoveryStore.learned_at.desc())
     )
     return [
         {
