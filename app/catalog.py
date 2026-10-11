@@ -86,6 +86,11 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
                 "id": offer.id,
                 "product_id": product.id,
                 "title": product.title,
+                "variant_attributes": {
+                    key: value
+                    for key, value in product.attributes.items()
+                    if key in {"model", "color", "size", "ram_gb", "storage_gb", "pack"}
+                },
                 "image_url": product.image_url,
                 "rating": offer.rating,
                 "retailer_id": retailer.id,

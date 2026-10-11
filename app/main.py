@@ -21,6 +21,7 @@ from app.discovery import router as discovery_router
 from app.history_imports import router as imports_router
 from app.http_safety import RequestSafetyMiddleware
 from app.ingestion import IngestionError, ingest
+from app.insights import router as insights_router
 from app.lookup import router as lookup_router
 from app.schemas import IngestBatch
 
@@ -36,6 +37,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(analysis_router)
+app.include_router(insights_router)
 app.include_router(lookup_router)
 app.include_router(comparison_router)
 app.include_router(imports_router)
