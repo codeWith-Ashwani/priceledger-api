@@ -12,6 +12,7 @@ from app.catalog import approved_sources, get_product, offers_for
 from app.collection import record_attempt, reserve_requests
 from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
+from app.discovery import registered_stores
 from app.identity import match_model, match_variant, model_attributes, model_key
 from app.limits import lookup_limit
 from app.lookup import reserve_stores, store_listing
@@ -91,6 +92,7 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
         offer.availability,
         offer.condition,
         offer.seller,
+        listed_fees=offer.current_listed_fees,
     )
 
 
@@ -156,8 +158,12 @@ def model_offers(db: Session, product_id: str, anchor: Listing) -> list[dict]:
     ]
 
 
-def discover_store(retailer: str, query: str, expected: dict | None = None) -> dict:
-    result = search_store(retailer, query)
+def discover_store(
+    retailer: str, query: str, expected: dict | None = None, *, custom: dict | None = None
+) -> dict:
+    result = (
+        search_store(retailer, query, custom=custom) if custom else search_store(retailer, query)
+    )
     candidates = []
     failures = []
     failed_checks = []
@@ -186,14 +192,15 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     anchor_retailers = set(
         db.scalars(select(Offer.retailer_id).where(Offer.product_id == product_id))
     )
+    custom = registered_stores(db, product.brand)
     selected = [
         retailer
-        for retailer in discovery_retailers(product.category, product.brand)
+        for retailer in [*discovery_retailers(product.category, product.brand), *custom]
         if retailer not in anchor_retailers
     ]
     if (
         existing
-        and existing.result.get("discovery_version") == 8
+        and existing.result.get("discovery_version") == 9
         and existing.result.get("discovery_retailers") == selected
         and utc(existing.checked_at) > now() - timedelta(minutes=15)
     ):
@@ -251,12 +258,21 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     query = discovery_query(anchor)
     retailers = selected
     # Reserve one search and up to two page reads per store before parallel discovery.
-    permitted, limited = reserve_stores(db, retailers, cost=3)
+    permitted, limited = reserve_stores(db, retailers, cost=3, custom=custom)
     with ThreadPoolExecutor(max_workers=3) as pool:
         discoveries = list(
             pool.map(
-                lambda retailer: discover_store(
-                    retailer, query, {**anchor.attributes, "_brand": anchor.brand}
+                lambda retailer: (
+                    discover_store(
+                        retailer,
+                        query,
+                        {**anchor.attributes, "_brand": anchor.brand},
+                        custom=custom[retailer],
+                    )
+                    if retailer in custom
+                    else discover_store(
+                        retailer, query, {**anchor.attributes, "_brand": anchor.brand}
+                    )
                 ),
                 permitted,
             )
@@ -342,7 +358,9 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
         stores.append(
             {
                 "retailer": retailer,
-                "retailer_name": STORES[retailer][0],
+                "retailer_name": custom[retailer]["name"]
+                if retailer in custom
+                else STORES[retailer][0],
                 "status": "verified"
                 if verified
                 else "model_match"
@@ -384,7 +402,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
             "source_ids": sorted(source_ids),
             "discovery_retailers": retailers,
-            "discovery_version": 8,
+            "discovery_version": 9,
             "model_offers": model_offers(db, product_id, anchor),
         }
     )

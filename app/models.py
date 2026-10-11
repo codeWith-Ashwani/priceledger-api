@@ -72,6 +72,7 @@ class Offer(Base):
         String(20), default="unknown", server_default="unknown"
     )
     rating: Mapped[dict | None] = mapped_column(JSON)
+    current_listed_fees: Mapped[list | None] = mapped_column(JSON)
 
 
 class Observation(Base):
@@ -103,6 +104,17 @@ class Observation(Base):
     import_id: Mapped[str | None] = mapped_column(ForeignKey("history_imports.id"))
     evidence_reference: Mapped[str | None] = mapped_column(String(1000))
     price_type: Mapped[str] = mapped_column(String(30), default="listing", server_default="listing")
+    listed_fees: Mapped[list | None] = mapped_column(JSON)
+
+
+class DiscoveryStore(Base):
+    __tablename__ = "discovery_stores"
+    retailer_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), unique=True)
+    host: Mapped[str] = mapped_column(String(253), unique=True)
+    brands: Mapped[list] = mapped_column(JSON)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    learned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class ProductMatch(Base):

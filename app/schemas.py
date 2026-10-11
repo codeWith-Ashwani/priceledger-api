@@ -15,6 +15,13 @@ from pydantic import (
 from app.db import now
 
 
+class ListedFee(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    label: str = Field(min_length=1, max_length=80)
+    amount_paise: StrictInt = Field(ge=0, le=2_000_000_000)
+    evidence: Literal["page_price_breakdown", "structured_offer"]
+
+
 class ObservationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     offer_id: str = Field(min_length=1, max_length=120)
@@ -27,9 +34,13 @@ class ObservationInput(BaseModel):
     in_stock: StrictBool
     currency: Literal["INR"] = "INR"
     evidence_kind: Literal["recorded", "page_check", "historical_import"] = "recorded"
+    listed_fees: list[ListedFee] | None = Field(default=None, max_length=8)
 
     @model_validator(mode="after")
     def validate_context(self):
+        labels = [fee.label.casefold() for fee in self.listed_fees or []]
+        if len(set(labels)) != len(labels):
+            raise ValueError("Listed fee labels must be unique")
         if self.in_stock and self.item_paise is None:
             raise ValueError("An available offer requires an item price")
         if self.observed_at > now() + timedelta(minutes=5):

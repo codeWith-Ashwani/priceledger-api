@@ -17,6 +17,7 @@ from app.catalog import router
 from app.comparison import router as comparison_router
 from app.config import get_settings
 from app.db import get_db
+from app.discovery import router as discovery_router
 from app.history_imports import router as imports_router
 from app.http_safety import RequestSafetyMiddleware
 from app.ingestion import IngestionError, ingest
@@ -38,6 +39,7 @@ app.include_router(analysis_router)
 app.include_router(lookup_router)
 app.include_router(comparison_router)
 app.include_router(imports_router)
+app.include_router(discovery_router)
 
 
 @app.exception_handler(RequestValidationError)

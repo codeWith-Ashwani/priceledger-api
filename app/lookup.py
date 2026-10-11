@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.collection import public_source, record_attempt, reserve_requests, touch_offer, track_offer
 from app.config import get_settings
 from app.db import get_db, now, utc
+from app.discovery import learn_store, registered_stores
 from app.identity import model_attributes
 from app.ingestion import ingest
 from app.limits import lookup_limit
@@ -137,6 +138,7 @@ def store_listing(
                     shipping_paise=listing.shipping_paise,
                     in_stock=listing.availability == "in_stock",
                     evidence_kind="page_check",
+                    listed_fees=listing.listed_fees,
                 )
             ],
         ),
@@ -146,6 +148,7 @@ def store_listing(
     if manage_job:
         track_offer(db, offer, requested=True)
         record_attempt(db, target, started_at=started_at or observed_at)
+    learn_store(db, listing)
     if commit:
         db.commit()
     else:
@@ -221,9 +224,21 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
                 "Paste a full product URL or enter a brand, model and variant (up to 128 characters).",
                 400,
             )
-        permitted, limited = reserve_stores(db, discovery_retailers(), cost=1)
+        custom = registered_stores(db)
+        permitted, limited = reserve_stores(
+            db, [*discovery_retailers(), *custom], cost=1, custom=custom
+        )
         with ThreadPoolExecutor(max_workers=3) as pool:
-            stores = list(pool.map(lambda retailer: search_store(retailer, query), permitted))
+            stores = list(
+                pool.map(
+                    lambda retailer: (
+                        search_store(retailer, query, custom=custom[retailer])
+                        if retailer in custom
+                        else search_store(retailer, query)
+                    ),
+                    permitted,
+                )
+            )
         for store in stores:
             if store["status"] not in {"ok", "no_matches"}:
                 record_attempt(
@@ -245,23 +260,29 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
         raise HTTPException(exc.status, detail={"code": exc.code, "message": exc.message}) from exc
 
 
-def reserve_stores(db: Session, retailers: list[str], *, cost: int) -> tuple[list[str], dict]:
+def reserve_stores(
+    db: Session, retailers: list[str], *, cost: int, custom: dict | None = None
+) -> tuple[list[str], dict]:
     permitted, limited = [], {}
     for retailer in retailers:
+        spec = (custom or {}).get(retailer)
+        name, url = (
+            (spec["name"], spec["search_base"])
+            if spec
+            else (STORES[retailer][0], STORES[retailer][2])
+        )
         try:
             # Official-store search reads its catalog plus one model's SKU list.
-            reserve_requests(
-                db, Target(retailer, STORES[retailer][2], None), cost + (retailer == "iqoo")
-            )
+            reserve_requests(db, Target(retailer, url, None), cost + (retailer == "iqoo"))
             permitted.append(retailer)
         except LookupError as exc:
             db.rollback()
             limited[retailer] = {
                 "retailer": retailer,
-                "retailer_name": STORES[retailer][0],
+                "retailer_name": name,
                 "status": exc.code,
                 "message": exc.message,
-                "search_url": STORES[retailer][2],
+                "search_url": url,
                 "items": [],
             }
     return permitted, limited

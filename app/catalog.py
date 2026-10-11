@@ -97,6 +97,11 @@ def offers_for(db: Session, product_ids: list[str]) -> dict[str, list[dict]]:
                 "item_paise": item,
                 "shipping_paise": shipping,
                 "total_paise": total,
+                "listed_fees": offer.current_listed_fees,
+                "known_subtotal_paise": total
+                + sum(fee["amount_paise"] for fee in offer.current_listed_fees or [])
+                if total is not None
+                else None,
                 "in_stock": offer.current_in_stock,
                 "stale": stale,
                 "observed_at": timestamp,
@@ -291,6 +296,7 @@ def history(
                 "item_paise": item,
                 "shipping_paise": shipping,
                 "in_stock": observation.in_stock,
+                "listed_fees": observation.listed_fees,
             }
         )
     return {

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
         "boat",
     ]
     lookup_cache_minutes: int = Field(default=15, ge=1, le=1440)
+    discovery_extra_store_limit: int = Field(default=4, ge=0, le=8)
     lookup_requests_per_minute: int = Field(default=12, ge=1, le=1000)
     read_requests_per_minute: int = Field(default=120, ge=1, le=10_000)
     admin_requests_per_minute: int = Field(default=60, ge=1, le=1000)

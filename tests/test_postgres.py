@@ -444,3 +444,98 @@ def test_postgres_opposite_catalog_scans_preserve_one_match():
             )
             == 1
         )
+
+
+def test_postgres_learned_store_and_fee_json_roundtrip():
+    from sqlalchemy import select
+
+    from app.discovery import registered_stores
+    from app.lookup import store_listing
+    from app.models import DiscoveryStore, Observation, Offer
+    from app.retail import target_for
+
+    fee = {"label": "Listed handling fee", "amount_paise": 3900, "evidence": "page_price_breakdown"}
+    listing = Listing(
+        target_for("https://integration-shop.example.org/products/phone"),
+        "Integration Phone",
+        "Integration",
+        "mobile",
+        {"sku": "PGSHOP"},
+        None,
+        100000,
+        0,
+        "in_stock",
+        "new",
+        "Integration seller",
+        listed_fees=[fee],
+        discovery_kind="shopify_html",
+    )
+    with SessionLocal() as db:
+        product_id = store_listing(db, listing)
+        assert db.get(DiscoveryStore, listing.target.retailer).brands == ["Integration"]
+        assert listing.target.retailer in registered_stores(db, "Integration")
+        assert db.get(Offer, product_id + ":public-page").current_listed_fees == [fee]
+        assert db.scalar(
+            select(Observation).where(Observation.offer_id == product_id + ":public-page")
+        ).listed_fees == [fee]
+
+
+def test_postgres_concurrent_learning_cannot_exceed_registry_capacity():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sqlalchemy import func, select
+
+    from app.lookup import store_listing
+    from app.models import DiscoveryStore, Product, Source
+    from app.retail import target_for
+
+    with SessionLocal() as db:
+        count = db.scalar(select(func.count()).select_from(DiscoveryStore))
+        for index in range(63 - count):
+            target = target_for(f"https://capacity-existing-{index}.example.org/products/phone")
+            source_id = "public-page:" + target.retailer
+            db.add(
+                Source(
+                    id=source_id,
+                    name="Capacity integration source",
+                    kind="public_page",
+                    display_allowed=True,
+                    history_allowed=True,
+                )
+            )
+            db.flush()
+            db.add(
+                DiscoveryStore(
+                    retailer_id=target.retailer,
+                    source_id=source_id,
+                    host=f"capacity-existing-{index}.example.org",
+                    brands=["Integration"],
+                    enabled=True,
+                    learned_at=now(),
+                )
+            )
+        db.commit()
+
+    def register(index):
+        listing = Listing(
+            target_for(f"https://capacity-new-{index}.example.org/products/phone"),
+            "Integration Phone",
+            "Integration",
+            "mobile",
+            {"sku": "CAP"},
+            None,
+            100000,
+            0,
+            "in_stock",
+            "new",
+            "Integration seller",
+            discovery_kind="shopify_html",
+        )
+        with SessionLocal() as db:
+            return store_listing(db, listing)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(register, range(8)))
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(DiscoveryStore)) == 64
+        assert all(db.get(Product, product_id) is not None for product_id in ids)

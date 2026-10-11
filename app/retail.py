@@ -94,6 +94,8 @@ class Listing:
     condition: str
     seller: str
     rating: dict | None = None
+    listed_fees: list[dict] | None = None
+    discovery_kind: str | None = None
 
 
 def discovery_retailers(category: str | None = None, brand: str | None = None) -> list[str]:
@@ -355,6 +357,80 @@ def amazon_condition(soup: BeautifulSoup, asin: str) -> str:
     return "unknown"
 
 
+def shopify_product(soup: BeautifulSoup, target: Target) -> dict | None:
+    handle = urlsplit(target.url).path.rstrip("/").split("/products/")[-1]
+    if not re.fullmatch(r"[a-zA-Z0-9-]{1,100}", handle):
+        return None
+    for script in soup.find_all("script"):
+        text = script.get_text()
+        try:
+            if script.get("type") == "application/json" and str(script.get("id", "")).startswith(
+                "ProductJson"
+            ):
+                data = json.loads(text)
+            else:
+                assignment = re.search(r"\bvar\s+json_product\s*=\s*(\{)", text)
+                if not assignment:
+                    assignment = re.search(r"\bvar\s+meta\s*=\s*(\{)", text)
+                    if not assignment:
+                        continue
+                    metadata, _ = json.JSONDecoder().raw_decode(text, assignment.start(1))
+                    data = metadata.get("product") if isinstance(metadata, dict) else None
+                else:
+                    data, _ = json.JSONDecoder().raw_decode(text, assignment.start(1))
+        except (ValueError, RecursionError):
+            continue
+        if (
+            isinstance(data, dict)
+            and data.get("handle") == handle
+            and isinstance(data.get("variants"), list)
+        ):
+            return data
+    return None
+
+
+def shopify_discovery(soup: BeautifulSoup, target: Target, sku: str | None) -> bool:
+    data = shopify_product(soup, target)
+    requested = parse_qs(urlsplit(target.url).query).get("variant", [None])[0]
+    return bool(
+        data
+        and sku
+        and any(
+            isinstance(variant, dict)
+            and str(variant.get("sku", "")) == sku
+            and (not requested or str(variant.get("id", "")) == requested)
+            for variant in data["variants"][:500]
+        )
+    )
+
+
+def listed_fees(soup: BeautifulSoup, target: Target) -> list[dict] | None:
+    fees = {}
+    if target.retailer == "flipkart":
+        for anchor in soup.select('a[href*="/pp-protect-promise-fee?"]'):
+            parsed = urlsplit(urljoin(target.url, anchor["href"]))
+            if retailer_key(parsed.hostname or "") != "flipkart" or parse_qs(parsed.query).get(
+                "pid"
+            ) != [target.external_id]:
+                continue
+            match = re.fullmatch(
+                r"\+\s*₹\s*([0-9,]+(?:\.[0-9]{1,2})?)\s+Protect Promise Fee",
+                anchor.get_text(" ", strip=True),
+                re.I,
+            )
+            amount = paise(match[1].replace(",", "")) if match else None
+            if amount is not None:
+                label = "Protect Promise Fee"
+                if label in fees and fees[label]["amount_paise"] != amount:
+                    return None
+                fees[label] = {
+                    "label": label,
+                    "amount_paise": amount,
+                    "evidence": "page_price_breakdown",
+                }
+    return list(fees.values()) or None
+
+
 def selected_offer(item: dict, soup: BeautifulSoup, target: Target) -> tuple[dict, dict, Target]:
     offers = item.get("offers", {})
     if not isinstance(offers, list):
@@ -396,33 +472,14 @@ def selected_offer(item: dict, soup: BeautifulSoup, target: Target) -> tuple[dic
     # A product-level image can depict a different colour. Only retain an image
     # tied to the selected variant in literal Shopify product JSON.
     item = {**item, "sku": offer.get("sku", item.get("sku", "")), "image": None}
-    handle = urlsplit(resolved.url).path.split("/products/")[-1]
-    for script in soup.find_all("script"):
-        text = script.get_text()
-        try:
-            if script.get("type") == "application/json" and str(script.get("id", "")).startswith(
-                "ProductJson"
-            ):
-                data = json.loads(text)
-            else:
-                assignment = re.search(r"\bvar\s+json_product\s*=\s*(\{)", text)
-                if not assignment:
-                    continue
-                data, _ = json.JSONDecoder().raw_decode(text, assignment.start(1))
-        except (ValueError, RecursionError):
-            continue
-        if not isinstance(data, dict) or data.get("handle") != handle:
-            continue
-        variants = data.get("variants", [])
-        if not isinstance(variants, list):
-            continue
+    data = shopify_product(soup, resolved)
+    if data:
+        variants = data["variants"][:500]
         matches = [v for v in variants if isinstance(v, dict) and str(v.get("id")) == selected]
-        if len(matches) != 1 or matches[0].get("sku") != item["sku"]:
-            continue
-        image = matches[0].get("featured_image")
-        if isinstance(image, dict) and isinstance(image.get("src"), str):
-            item["image"] = urljoin(resolved.url, image["src"])
-        break
+        if len(matches) == 1 and matches[0].get("sku") == item["sku"]:
+            image = matches[0].get("featured_image")
+            if isinstance(image, dict) and isinstance(image.get("src"), str):
+                item["image"] = urljoin(resolved.url, image["src"])
     if name:
         name = re.split(r"\s+-\s+(?:Sold out|Rs\.)", str(name), flags=re.I)[0].strip()
         item = {**item, "color": name, "name": item["name"] + " (" + name + ")"}
@@ -436,11 +493,14 @@ def parse_listing(html: str, target: Target) -> Listing:
             "retailer_blocked", "The retailer requested a CAPTCHA. No price was recorded."
         )
     products = []
+    groups = []
     for script in soup.select('script[type="application/ld+json"]'):
         try:
+            objects = list(schema_objects(json.loads(script.get_text())))
+            groups.extend(item for item in objects if item.get("@type") == "ProductGroup")
             products.extend(
                 item
-                for item in schema_objects(json.loads(script.get_text()))
+                for item in objects
                 if item.get("name")
                 and (
                     item.get("@type") == "Product"
@@ -449,6 +509,70 @@ def parse_listing(html: str, target: Target) -> Listing:
             )
         except (ValueError, RecursionError):
             continue
+    # Shopify themes can publish a stale product-level minimum price alongside
+    # ProductGroup variants. Prefer a selected group entry only when its own INR
+    # price and SKU agree with literal same-product Shopify metadata.
+    data = shopify_product(soup, target) if groups else None
+    if data:
+        requested = parse_qs(urlsplit(target.url).query).get("variant", [None])[0]
+        selected_ids = {
+            node.get("value") for node in soup.select('form[action*="cart/add"] input[name="id"]')
+        }
+        selected_ids.update(
+            node.get("value")
+            for node in soup.select('form[action*="cart/add"] select[name="id"] option[selected]')
+        )
+        selected = requested or (next(iter(selected_ids)) if len(selected_ids) == 1 else None)
+        variants = [
+            v
+            for v in data["variants"][:500]
+            if isinstance(v, dict) and str(v.get("id")) == selected
+        ]
+        group_products = []
+        for group in groups:
+            group_url = urlsplit(urljoin(target.url, str(group.get("url", ""))))
+            if group_url.hostname != urlsplit(target.url).hostname or group_url.path.rstrip(
+                "/"
+            ) != urlsplit(target.url).path.rstrip("/"):
+                continue
+            children = group.get("hasVariant", [])
+            for child in (children if isinstance(children, list) else [children])[:500]:
+                if not isinstance(child, dict) or child.get("@type") != "Product":
+                    continue
+                offers = child.get("offers", {})
+                offers = offers if isinstance(offers, list) else [offers]
+                if len(offers) != 1 or not isinstance(offers[0], dict):
+                    continue
+                offer = offers[0]
+                url = urljoin(target.url, str(offer.get("url", "")))
+                parsed = urlsplit(url)
+                if not selected or parse_qs(parsed.query).get("variant") != [selected]:
+                    continue
+                if parsed.hostname != group_url.hostname or parsed.path.rstrip(
+                    "/"
+                ) != group_url.path.rstrip("/"):
+                    continue
+                if (
+                    len(variants) != 1
+                    or not child.get("sku")
+                    or str(variants[0].get("sku", "")) != str(child.get("sku", ""))
+                    or type(variants[0].get("price")) is not int
+                    or offer.get("priceCurrency") != "INR"
+                    or paise(offer.get("price")) != variants[0].get("price")
+                ):
+                    raise LookupError(
+                        "ambiguous_price",
+                        "Selected variant prices disagree on the retailer page. No price was recorded.",
+                    )
+                inherited = {
+                    key: group[key]
+                    for key in ("brand", "category", "model", "itemCondition")
+                    if key in group
+                }
+                group_products.append({**inherited, **child, "offers": offer})
+                target = target_for(url)
+        if group_products:
+            products = group_products
     if (
         target.retailer == "flipkart"
         and target.external_id
@@ -566,6 +690,10 @@ def parse_listing(html: str, target: Target) -> Listing:
                     condition,
                     str(seller)[:150],
                     product_rating(item.get("aggregateRating")),
+                    listed_fees=listed_fees(soup, target),
+                    discovery_kind="shopify_html"
+                    if shopify_discovery(soup, target, attributes.get("sku"))
+                    else None,
                 )
         # A named product without offers can still start discovery. Record an
         # unpriced check, never a zero-price offer or a made-up historical price.
@@ -712,7 +840,12 @@ def load_listing(target: Target) -> Listing:
     return parse_listing(html, resolved)
 
 
-def search_store(retailer: str, query: str) -> dict:
+def search_store(retailer: str, query: str, *, custom: dict | None = None) -> dict:
+    name, base = (
+        (custom["name"], custom["search_base"])
+        if custom
+        else (STORES[retailer][0], STORES[retailer][2])
+    )
     if retailer == "iqoo":
         from app.iqoo import search_candidates
 
@@ -721,7 +854,7 @@ def search_store(retailer: str, query: str) -> dict:
             items = search_candidates(query, lambda url: fetch_page(url, retailer)[0])
             return {
                 "retailer": retailer,
-                "retailer_name": STORES[retailer][0],
+                "retailer_name": name,
                 "status": "ok" if items else "no_matches",
                 "message": "Official catalog checked; exact SKU prices require verification.",
                 "search_url": search_url,
@@ -730,13 +863,16 @@ def search_store(retailer: str, query: str) -> dict:
         except LookupError as exc:
             return {
                 "retailer": retailer,
-                "retailer_name": STORES[retailer][0],
+                "retailer_name": name,
                 "status": exc.code,
                 "message": exc.message,
                 "search_url": search_url,
                 "items": [],
             }
-    search_url = STORES[retailer][2] + urlencode({"k" if retailer == "amazon" else "q": query})
+    parameters = {"k" if retailer == "amazon" else "q": query}
+    if custom:
+        parameters["type"] = "product"
+    search_url = base + urlencode(parameters)
     try:
         html, _ = fetch_page(search_url, retailer)
         soup = BeautifulSoup(html, "html.parser")
@@ -747,7 +883,7 @@ def search_store(retailer: str, query: str) -> dict:
 
         terms = tokens(query)
         items = {}
-        if retailer in {"sony", "boat"}:
+        if retailer in {"sony", "boat"} or custom:
             # Shopify can render search cards through JavaScript. Read only its
             # literal JSON catalog metadata, never execute scripts or trust prices.
             for script in soup.select("script"):
@@ -792,7 +928,7 @@ def search_store(retailer: str, query: str) -> dict:
                                 title, str(product.get("vendor", "")), {}
                             ),
                             "retailer": retailer,
-                            "retailer_name": STORES[retailer][0],
+                            "retailer_name": name,
                         }
                     if len(items) >= 6:
                         break
@@ -802,6 +938,8 @@ def search_store(retailer: str, query: str) -> dict:
             except LookupError:
                 continue
             if target.retailer != retailer or not target.external_id:
+                continue
+            if custom and not re.search(r"/products/[a-zA-Z0-9-]+/?$", urlsplit(target.url).path):
                 continue
             image = anchor.find("img")
             title = (
@@ -822,13 +960,13 @@ def search_store(retailer: str, query: str) -> dict:
                     ),
                     "url": target.url,
                     "retailer": retailer,
-                    "retailer_name": STORES[retailer][0],
+                    "retailer_name": name,
                 }
             if len(items) >= 12:
                 break
         return {
             "retailer": retailer,
-            "retailer_name": STORES[retailer][0],
+            "retailer_name": name,
             "status": "ok" if items else "no_matches",
             "message": "Choose the exact model, colour, size and pack. Prices are checked after selection."
             if items
@@ -839,7 +977,7 @@ def search_store(retailer: str, query: str) -> dict:
     except LookupError as exc:
         return {
             "retailer": retailer,
-            "retailer_name": STORES[retailer][0],
+            "retailer_name": name,
             "status": exc.code,
             "message": exc.message,
             "search_url": search_url,

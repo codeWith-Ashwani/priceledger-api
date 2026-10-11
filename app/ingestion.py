@@ -54,6 +54,8 @@ def ingest(
         # Preserve fingerprints of batches accepted before evidence labels were added.
         if record.evidence_kind == "recorded":
             canonical.pop("evidence_kind")
+        if record.listed_fees is None:
+            canonical.pop("listed_fees")
         canonical["observed_at"] = utc(record.observed_at).isoformat()
         fingerprint = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
         previous = existing.get(record.external_event_id)
@@ -87,6 +89,7 @@ def ingest(
                     in_stock=record.in_stock,
                     currency=record.currency,
                     evidence_kind=record.evidence_kind,
+                    listed_fees=record.model_dump()["listed_fees"],
                     variant_snapshot=dict(record.variant_attributes),
                     context_snapshot={
                         "seller": offer.seller,
@@ -122,6 +125,7 @@ def ingest(
                     current_item_paise=record.item_paise,
                     current_shipping_paise=record.shipping_paise,
                     current_in_stock=record.in_stock,
+                    current_listed_fees=record.model_dump()["listed_fees"],
                 )
                 .execution_options(synchronize_session="fetch")
             )

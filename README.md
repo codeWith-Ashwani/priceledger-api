@@ -28,6 +28,18 @@ Public page access varies. Some pages need JavaScript, refuse automated requests
 
 These are public-page observations in a private development prototype, not licensed historical feeds. Before public operation, review retailer/source permissions and obtain appropriate data access. Sources can be disabled by revoking their display/history flags or expiry; ingestion, lookup caching, display and collection enforce those settings. Source activation flags are technical configuration, not a representation that a retailer granted a license.
 
+## Learned store discovery and listed fees
+
+Successful readable Shopify product lookups can register additional stores automatically. Literal same-product Shopify metadata must identify the selected SKU; only genuinely observed brands are learned. Cross-store scans include up to four enabled learned stores for the requested brand alongside configured adapters. Name searches include up to four learned stores. `PRICELEDGER_DISCOVERY_EXTRA_STORE_LIMIT` accepts 0–8; zero disables additional searches. The registry retains at most 64 stores and 32 brands per store. Only fixed public `/search?q=...&type=product` pages are searched, and candidate prices require separate product-page verification. Existing source permission, request budget, cooldown, redirect and public-network checks apply.
+
+The owner workspace exposes learned stores through authenticated `GET /api/v1/admin/discovery-stores` and `POST /api/v1/admin/discovery-stores/{retailer_id}/status` with `{"enabled":false}` or `true`. Paused stores stay paused after later lookups. Resuming discovery never restores revoked source permissions. Pausing searches leaves existing permitted price evidence available.
+
+Shopify `ProductGroup` variants can be resolved using an explicit variant URL or an unambiguous selected purchase form. Variant SKU and INR price must agree with literal Shopify metadata before overriding stale parent-level schema prices. Other products, conflicting variant prices and ambiguous selections are rejected. No script is executed.
+
+Offer responses include nullable `listed_fees` and `known_subtotal_paise`. Current automatic extra-fee extraction recognizes Flipkart's explicit product-ID-bound Protect Promise Fee; other checkout charges remain unconfirmed. Each fee retains its label, integer paise amount and evidence kind. Known subtotal adds item price, known shipping and observed fees; unknown shipping keeps the subtotal null. A missing fee list does not assert fee-free checkout. Fresh missing evidence clears old current fees; observation history retains dated fee evidence. Conditional bank/coupon offers are excluded.
+
+Existing `total_paise`, `best_price_paise`, delivered history and assessments retain their **item + shipping** meaning and exclude listed extras, preserving historical comparability. The React cards and exact-variant headline use known subtotal where requested. Apply migration `79f240a1ce38` with `uv run alembic upgrade head` before starting this version. No provider credentials or new dependencies are required. Learning readable stores does not establish universal discovery, full checkout prices or historical data access.
+
 ## Collection and history
 
 Run a bounded refresh pass:
