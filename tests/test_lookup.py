@@ -162,6 +162,23 @@ def test_lookup_persists_real_contract_and_deduplicates_recent_requests(
     assert detail["launch_date"] is None
 
 
+def test_future_current_timestamp_is_not_a_lookup_cache_hit(client, db, monkeypatch, listing):
+    monkeypatch.setattr(lookup_module, "load_listing", lambda target: listing)
+    product_id = client.post("/api/v1/lookup", json={"query": listing.target.url}).json()[
+        "product_id"
+    ]
+    db.get(Offer, product_id + ":public-page").current_observed_at = now() + timedelta(hours=1)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(
+        lookup_module, "load_listing", lambda target: calls.append(target) or listing
+    )
+    response = client.post("/api/v1/lookup", json={"query": listing.target.url})
+    assert response.status_code == 200
+    assert not response.json()["cached"]
+    assert len(calls) == 1
+
+
 def test_future_checks_append_without_fabricating_backfill(client, db, monkeypatch, listing):
     monkeypatch.setattr(lookup_module, "load_listing", lambda target: listing)
     product_id = client.post("/api/v1/lookup", json={"query": listing.target.url}).json()[

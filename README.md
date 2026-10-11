@@ -32,6 +32,8 @@ Dedicated adapters cover Amazon India, Flipkart, Meesho, Croma, Reliance Digital
 
 All returned verified offers participate in comparison; there is no three/four-card cap or 100-candidate catalog cutoff. Discovery is bounded by candidate verification, source budgets and supported adapters. Missing cards can mean blocked access, cooldown, unreadable markup or unverified identity, rather than absent stock. Readable current pages do not provide complete historical archives.
 
+Candidate URLs must belong to the searched retailer before a listing is fetched. Duplicate canonical URLs are checked once per store scan. Rejected URLs remain diagnostics; failed page checks retain their validated target for audit recording. One rejected candidate cannot abort the other store results.
+
 ## Prices and history
 
 Amounts use integer INR **paise**. Unknown values remain `null`.
@@ -117,6 +119,8 @@ Settings use the `PRICELEDGER_` prefix. Origins and retailer lists use JSON arra
 | `COLLECTION_COOLDOWN_HOURS` | 6 | Source retry cooldown |
 
 Learning capacities do not hide existing stores when lowered. Cache validity includes candidate policy, source permissions and the enabled retailer set. Parser/security rules, schema contracts and statistical policy remain explicit versioned code. Raising concurrency/candidate counts increases source traffic; preserve budgets and cooldowns.
+
+Future-dated observations and scans cannot qualify as cache hits. Comparison anchors require an approved non-demo source even when reusing a cached result. Concurrent scans of one product retain the 409 lease guard and short `Retry-After` response; clients may retry within a bounded policy without bypassing source quotas.
 
 ## Administration and historical imports
 

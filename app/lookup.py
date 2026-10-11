@@ -163,11 +163,13 @@ def store_listing(
 def lookup_link(db: Session, query: str) -> dict:
     target = target_for(query)
     cached = db.scalar(select(Offer).where(Offer.product_url == target.url))
+    at = now()
     if (
         cached
         and cached.current_observed_at
-        and utc(cached.current_observed_at)
-        > now() - timedelta(minutes=get_settings().lookup_cache_minutes)
+        and at - timedelta(minutes=get_settings().lookup_cache_minutes)
+        < utc(cached.current_observed_at)
+        <= at
     ):
         source = db.get(Source, cached.source_id)
         product = db.get(Product, cached.product_id)
@@ -175,7 +177,8 @@ def lookup_link(db: Session, query: str) -> dict:
             source
             and source.display_allowed
             and source.history_allowed
-            and (source.expires_at is None or utc(source.expires_at) > now())
+            and source.kind != "demo"
+            and (source.expires_at is None or utc(source.expires_at) > at)
             and product
             and not product.is_demo
         ):

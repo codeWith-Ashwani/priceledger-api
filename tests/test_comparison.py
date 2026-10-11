@@ -1,14 +1,16 @@
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import func, select
 
 from app.comparison import discover_store, scan_comparison
 from app.config import get_settings
+from app.db import now
 from app.identity import match_variant, mobile_attributes, valid_gtin
 from app.lookup import store_listing
-from app.models import Observation, ProductMatch, Source
-from app.retail import Listing, Target
+from app.models import CollectionAttempt, ComparisonScan, Observation, ProductMatch, Source
+from app.retail import Listing, LookupError, Target
 
 
 @pytest.fixture
@@ -197,3 +199,138 @@ def test_revoked_source_is_removed_from_cached_comparison_and_history(
     assert not result["cached"]
     assert not result["stores"][0]["items"]
     assert len(client.get(f"/api/v1/products/{product_id}/history").json()["series"]) == 1
+
+
+def test_rejected_search_candidates_do_not_break_other_store_results(client, db, monkeypatch, pair):
+    left, right = pair
+    product_id = store_listing(db, left)
+    monkeypatch.setattr(get_settings(), "discovery_retailers", ["amazon", "meesho"])
+    monkeypatch.setattr(
+        "app.comparison.search_store",
+        lambda retailer, query: {
+            "status": "ok",
+            "search_url": "https://www.amazon.in/s?k=contract",
+            "items": [{"title": right.title, "url": "https://www.amazon.in/s?k=invalid"}]
+            if retailer == "amazon"
+            else [],
+        },
+    )
+    monkeypatch.setattr("app.comparison.load_listing", lambda _: pytest.fail("Invalid URL fetched"))
+    response = client.post(f"/api/v1/products/{product_id}/compare")
+    assert response.status_code == 200
+    assert len(response.json()["stores"]) == 2
+    assert "supported product page" in response.json()["stores"][0]["message"]
+    assert db.scalar(select(func.count()).select_from(Observation)) == 1
+
+
+def test_cross_store_search_candidate_is_rejected_before_fetch(monkeypatch, pair):
+    left, _ = pair
+    monkeypatch.setattr(
+        "app.comparison.search_store",
+        lambda *args: {"status": "ok", "items": [{"title": left.title, "url": left.target.url}]},
+    )
+    monkeypatch.setattr(
+        "app.comparison.load_listing", lambda _: pytest.fail("Unreserved source fetched")
+    )
+    result = discover_store("amazon", "Test phone")
+    assert result["listings"] == result["failed_checks"] == []
+    assert "another retailer" in result["failures"][0]
+
+
+def test_duplicates_and_rejected_urls_do_not_consume_valid_candidate_slots(monkeypatch, pair):
+    _, right = pair
+    monkeypatch.setattr(get_settings(), "discovery_candidates_per_store", 2)
+    another_url = "https://www.amazon.in/dp/B012345679"
+    monkeypatch.setattr(
+        "app.comparison.search_store",
+        lambda *args: {
+            "status": "ok",
+            "items": [
+                {"title": right.title, "url": url}
+                for url in [
+                    "https://www.amazon.in/s?k=bad",
+                    right.target.url,
+                    right.target.url,
+                    another_url,
+                ]
+            ],
+        },
+    )
+    calls = []
+
+    def load(target):
+        calls.append(target.url)
+        return replace(right, target=target)
+
+    monkeypatch.setattr("app.comparison.load_listing", load)
+    assert len(discover_store("amazon", "Test phone")["listings"]) == 2
+    assert calls == [right.target.url, another_url]
+
+
+def test_failed_candidate_retains_validated_target_and_is_recorded_once(
+    client, db, monkeypatch, pair
+):
+    left, right = pair
+    product_id = store_listing(db, left)
+    monkeypatch.setattr(get_settings(), "discovery_retailers", ["amazon"])
+    monkeypatch.setattr(
+        "app.comparison.search_store",
+        lambda *args: {
+            "status": "ok",
+            "search_url": "https://www.amazon.in/s?k=contract",
+            "items": [{"title": right.title, "url": right.target.url}] * 2,
+        },
+    )
+    calls = []
+
+    def fail(target):
+        calls.append(target)
+        raise LookupError("retailer_unreadable", "This product page cannot currently be read.")
+
+    monkeypatch.setattr("app.comparison.load_listing", fail)
+    response = client.post(f"/api/v1/products/{product_id}/compare")
+    assert response.status_code == 200
+    assert len(calls) == 1
+    failures = list(
+        db.scalars(select(CollectionAttempt).where(CollectionAttempt.outcome == "failure"))
+    )
+    assert len(failures) == 1
+    assert failures[0].product_url == right.target.url
+    assert failures[0].error_code == "retailer_unreadable"
+
+
+def test_future_scan_timestamp_does_not_qualify_for_cache(db, monkeypatch, pair):
+    left, right = pair
+    product_id = store_listing(db, left)
+    monkeypatch.setattr(get_settings(), "discovery_retailers", ["amazon"])
+    calls = []
+    monkeypatch.setattr(
+        "app.comparison.discover_store",
+        lambda *args: calls.append(True) or discovery(right),
+    )
+    scan_comparison(db, product_id)
+    db.get(ComparisonScan, product_id).checked_at = now() + timedelta(hours=1)
+    db.commit()
+    assert not scan_comparison(db, product_id)["cached"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("permission", ["display_allowed", "history_allowed", "expired", "demo"])
+def test_cached_comparison_cannot_use_disabled_anchor(client, db, monkeypatch, pair, permission):
+    left, right = pair
+    product_id = store_listing(db, left)
+    monkeypatch.setattr(get_settings(), "discovery_retailers", ["amazon"])
+    monkeypatch.setattr("app.comparison.discover_store", lambda *args: discovery(right))
+    scan_comparison(db, product_id)
+    source = db.get(Source, "public-page:flipkart")
+    if permission == "expired":
+        source.expires_at = now() - timedelta(seconds=1)
+    elif permission == "demo":
+        source.kind = "demo"
+    else:
+        setattr(source, permission, False)
+    db.commit()
+    monkeypatch.setattr(
+        "app.comparison.discover_store", lambda *args: pytest.fail("Disabled source used")
+    )
+    assert client.post(f"/api/v1/products/{product_id}/compare").status_code == 403

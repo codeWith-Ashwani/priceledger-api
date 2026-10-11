@@ -196,8 +196,12 @@ def test_busy_comparison_never_starts_discovery(client, db, monkeypatch):
         pytest.fail("Busy product must not start retailer discovery")
 
     monkeypatch.setattr("app.comparison.scan_comparison", forbidden)
-    response = client.post("/api/v1/products/phone-128/compare")
+    response = client.post(
+        "/api/v1/products/phone-128/compare", headers={"Origin": "http://127.0.0.1:5173"}
+    )
     assert response.status_code == 409
+    assert response.headers["Retry-After"] == "15"
+    assert "Retry-After" in response.headers["Access-Control-Expose-Headers"]
     release_comparison(db, "phone-128", token)
 
 

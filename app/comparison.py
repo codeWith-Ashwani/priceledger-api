@@ -8,12 +8,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.catalog import approved_sources, get_product, offers_for
+from app.catalog import get_product, offers_for
 from app.collection import record_attempt, reserve_requests
 from app.config import get_settings
 from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
 from app.discovery import registered_stores
+from app.evidence import approved_sources
 from app.identity import bundle_signature, match_model, match_variant, model_attributes, model_key
 from app.limits import lookup_limit
 from app.lookup import reserve_stores, store_listing
@@ -186,15 +187,30 @@ def discover_store(
     candidates = []
     failures = []
     failed_checks = []
+    seen = set()
     # Verification bounds and source reservations use the same configured limit.
     ranked = sorted(result["items"], key=lambda item: candidate_priority(item, expected or {}))
-    for item in ranked[: get_settings().discovery_candidates_per_store]:
+    for item in ranked:
+        if len(seen) >= get_settings().discovery_candidates_per_store:
+            break
         started_at = now()
+        target = None
         try:
-            candidates.append(load_listing(target_for(item["url"])))
+            candidate_target = target_for(item["url"])
+            if candidate_target.retailer != retailer:
+                raise LookupError(
+                    "retailer_mismatch",
+                    "The search returned a listing from another retailer; it was excluded.",
+                )
+            if candidate_target.url in seen:
+                continue
+            seen.add(candidate_target.url)
+            target = candidate_target
+            candidates.append(load_listing(target))
         except LookupError as exc:
             failures.append(exc.message)
-            failed_checks.append({"url": item["url"], "code": exc.code, "at": started_at})
+            if target is not None:
+                failed_checks.append({"target": target, "code": exc.code, "at": started_at})
             if exc.code == "retailer_blocked":
                 break
     return {
@@ -208,6 +224,22 @@ def discover_store(
 def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = None) -> dict:
     settings = get_settings()
     product = get_product(db, product_id)
+    at = now()
+    anchor_query = select(Offer).where(
+        Offer.product_id == product_id, Offer.product_url.is_not(None)
+    )
+    offer = db.scalar(
+        anchor_query.join(Source, Offer.source_id == Source.id)
+        .where(*approved_sources(at))
+        .order_by(Offer.current_observed_at.desc(), Offer.id)
+    )
+    if not offer:
+        if db.scalar(anchor_query.limit(1)):
+            raise HTTPException(403, "This product source has been disabled.")
+        raise HTTPException(
+            422, "This product needs a retailer listing before other stores can be compared."
+        )
+    anchor = listing_from_record(product, offer)
     existing = db.get(ComparisonScan, product_id)
     anchor_retailers = set(
         db.scalars(select(Offer.retailer_id).where(Offer.product_id == product_id))
@@ -223,47 +255,22 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
         and existing.result.get("discovery_version") == DISCOVERY_VERSION
         and existing.result.get("candidates_per_store") == settings.discovery_candidates_per_store
         and existing.result.get("discovery_retailers") == selected
-        and utc(existing.checked_at) > now() - timedelta(minutes=settings.comparison_cache_minutes)
+        and at - timedelta(minutes=settings.comparison_cache_minutes)
+        < utc(existing.checked_at)
+        <= at
     ):
         # Revoked sources must not leak cached prices or verified links.
         source_ids = existing.result.get("source_ids", [])
-        sources = list(db.scalars(select(Source).where(Source.id.in_(source_ids))))
-        if len(sources) == len(source_ids) and all(
-            source.display_allowed
-            and source.history_allowed
-            and (source.expires_at is None or utc(source.expires_at) > now())
-            for source in sources
-        ):
-            offer = db.scalar(
-                select(Offer).where(Offer.product_id == product_id, Offer.product_url.is_not(None))
-            )
-            if offer:
-                link_catalog_matches(db, product_id, listing_from_record(product, offer))
+        permitted_sources = set(
+            db.scalars(select(Source.id).where(Source.id.in_(source_ids), *approved_sources(at)))
+        )
+        if permitted_sources == set(source_ids):
+            link_catalog_matches(db, product_id, anchor)
             return {
                 **existing.result,
-                "model_offers": model_offers(db, product_id, listing_from_record(product, offer))
-                if offer
-                else [],
+                "model_offers": model_offers(db, product_id, anchor),
                 "cached": True,
             }
-    offer = db.scalar(
-        select(Offer)
-        .where(Offer.product_id == product_id, Offer.product_url.is_not(None))
-        .order_by(Offer.current_observed_at.desc())
-    )
-    if not offer:
-        raise HTTPException(
-            422, "This product needs a retailer listing before other stores can be compared."
-        )
-    source = db.get(Source, offer.source_id)
-    if (
-        not source
-        or not source.display_allowed
-        or not source.history_allowed
-        or (source.expires_at and utc(source.expires_at) <= now())
-    ):
-        raise HTTPException(403, "This product source has been disabled.")
-    anchor = listing_from_record(product, offer)
     link_catalog_matches(db, product_id, anchor)
     # Enrich old records with newly available variant metadata from the same listing.
     if (
@@ -318,9 +325,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                 error_code=search["status"],
             )
         for failed in discovery.get("failed_checks", []):
-            record_attempt(
-                db, target_for(failed["url"]), started_at=failed["at"], error_code=failed["code"]
-            )
+            record_attempt(db, failed["target"], started_at=failed["at"], error_code=failed["code"])
         db.commit()
         items = []
         seen_listings = set()
