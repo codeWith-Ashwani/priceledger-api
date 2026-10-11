@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from bs4 import BeautifulSoup
 
 from app.config import get_settings
-from app.identity import mobile_attributes
+from app.identity import mobile_attributes, model_attributes
 from app.public_http import PublicFetchError, fetch_public
 
 STORES = {
@@ -21,6 +21,8 @@ STORES = {
     "croma": ("Croma", "#08776a", "https://www.croma.com/searchB?"),
     "reliance": ("Reliance Digital", "#cf3038", "https://www.reliancedigital.in/search?"),
     "iqoo": ("iQOO Official Store", "#986b08", "https://shop.iqoo.com/in/products/phone"),
+    "sony": ("Sony Center", "#222222", "https://shopatsc.com/search?"),
+    "boat": ("boAt Official Store", "#c52e37", "https://www.boat-lifestyle.com/search?"),
 }
 HOSTS = {
     "amazon.in": "amazon",
@@ -39,6 +41,10 @@ HOSTS = {
     "reliancedigital.in": "reliance",
     "www.reliancedigital.in": "reliance",
     "shop.iqoo.com": "iqoo",
+    "shopatsc.com": "sony",
+    "www.shopatsc.com": "sony",
+    "boat-lifestyle.com": "boat",
+    "www.boat-lifestyle.com": "boat",
 }
 SHORT_HOSTS = {"amzn.in", "amzn.to", "fkrt.it", "dl.flipkart.com"}
 IMAGE_HOSTS = {
@@ -53,6 +59,11 @@ IMAGE_HOSTS = {
     "www.reliancedigital.in",
     "assets.reliancedigital.in",
     "exstatic-in.iqoo.com",
+    "contents.mediadecathlon.com",
+    "cdn.jiostore.online",
+    "cdn.shopify.com",
+    "www.boat-lifestyle.com",
+    "images.samsung.com",
 }
 
 
@@ -77,7 +88,7 @@ class Listing:
     category: str
     attributes: dict
     image_url: str | None
-    item_paise: int
+    item_paise: int | None
     shipping_paise: int | None
     availability: str
     condition: str
@@ -94,8 +105,10 @@ def discovery_retailers(category: str | None = None, brand: str | None = None) -
     return [
         store
         for store in configured
-        if (not non_electronics or store not in {"croma", "reliance", "iqoo"})
+        if (not non_electronics or store not in {"croma", "reliance", "iqoo", "sony", "boat"})
         and (store != "iqoo" or brand is None or brand.lower() == "iqoo")
+        and (store != "sony" or brand is None or brand.lower() == "sony")
+        and (store != "boat" or brand is None or brand.lower() == "boat")
     ]
 
 
@@ -196,6 +209,17 @@ def target_for(value: str) -> Target:
                 "https://www.reliancedigital.in" + parsed.path.rstrip("/"),
                 identity[-150:],
             )
+    elif retailer in {"sony", "boat"}:
+        match = re.search(r"/products/([a-zA-Z0-9-]+)/?$", parsed.path)
+        variant = parse_qs(parsed.query).get("variant", [None])[0]
+        if match and (variant is None or re.fullmatch(r"\d{1,20}", variant)):
+            host = "shopatsc.com" if retailer == "sony" else "www.boat-lifestyle.com"
+            canonical = f"https://{host}/products/{match[1]}"
+            return Target(
+                retailer,
+                canonical + ("?" + urlencode({"variant": variant}) if variant else ""),
+                (match[1][:100] + "-" + variant) if variant else match[1][:100],
+            )
     raise LookupError(
         "invalid_link", "This is not a supported product page. Paste the product's full link.", 400
     )
@@ -206,11 +230,6 @@ def fetch_page(url: str, retailer: str) -> tuple[str, str]:
     try:
         return fetch_public(url, lambda candidate: allowed_url(candidate, retailer))
     except PublicFetchError as exc:
-        if retailer.startswith("site-"):
-            raise LookupError(
-                "store_unavailable",
-                "This store could not expose a readable public product page. No price was recorded.",
-            ) from exc
         raise LookupError(exc.code, str(exc), exc.status) from exc
     except OSError as exc:
         raise LookupError(
@@ -244,6 +263,34 @@ def schema_objects(value):
         for item in value.values():
             if isinstance(item, (dict, list)):
                 yield from schema_objects(item)
+
+
+def consolidate_products(products: list[dict]) -> list[dict]:
+    """Combine complementary schema blocks only with a shared identity and price."""
+    result: list[dict] = []
+    for product in products:
+        for index, existing in enumerate(result):
+            identifier = product.get("sku") or product.get("@id")
+            if not identifier or identifier != (existing.get("sku") or existing.get("@id")):
+                continue
+            keys = ("name", "brand", "model", "color", "size", "mpn", "gtin13", "gtin14")
+            if any(
+                key in product and key in existing and product[key] != existing[key] for key in keys
+            ):
+                continue
+            first, second = existing.get("offers", {}), product.get("offers", {})
+            if not isinstance(first, dict) or not isinstance(second, dict):
+                continue
+            if any(
+                key in first and key in second and first[key] != second[key]
+                for key in ("price", "priceCurrency", "availability", "itemCondition", "seller")
+            ):
+                continue
+            result[index] = {**existing, **product, "offers": {**first, **second}}
+            break
+        else:
+            result.append(product)
+    return result
 
 
 def safe_image(value, product_host: str | None = None) -> str | None:
@@ -308,6 +355,80 @@ def amazon_condition(soup: BeautifulSoup, asin: str) -> str:
     return "unknown"
 
 
+def selected_offer(item: dict, soup: BeautifulSoup, target: Target) -> tuple[dict, dict, Target]:
+    offers = item.get("offers", {})
+    if not isinstance(offers, list):
+        return item, offers if isinstance(offers, dict) else {}, target
+    if len(offers) == 1:
+        return item, offers[0] if isinstance(offers[0], dict) else {}, target
+    requested = parse_qs(urlsplit(target.url).query).get("variant", [None])[0]
+    options = soup.select('form[action*="cart/add"] select[name="id"] option[selected]')
+    ids = {node.get("value") for node in options}
+    ids.update(
+        node.get("value") for node in soup.select('form[action*="cart/add"] input[name="id"]')
+    )
+    selected = requested or (next(iter(ids)) if len(ids) == 1 else None)
+    if not selected:
+        return item, {}, target
+    candidates = [
+        offer
+        for offer in offers
+        if isinstance(offer, dict)
+        and isinstance(offer.get("url"), str)
+        and parse_qs(urlsplit(offer["url"]).query).get("variant", [None])[0] == selected
+    ]
+    if len(candidates) != 1:
+        raise LookupError(
+            "missing_variant", "The store did not identify the selected variant price."
+        )
+    offer = dict(candidates[0])
+    resolved = target_for(offer["url"])
+    if (
+        resolved.retailer != target.retailer
+        or urlsplit(resolved.url).path.split("/products/")[-1]
+        != urlsplit(target.url).path.split("/products/")[-1]
+    ):
+        raise LookupError("missing_variant", "The offer belongs to a different product.")
+    option = next((node for node in options if node.get("value") == selected), None)
+    name = offer.get("name") or (option.get_text(" ", strip=True) if option else "")
+    if option and re.search(r"sold out|out of stock", option.get_text(), re.I):
+        offer["availability"] = "https://schema.org/OutOfStock"
+    # A product-level image can depict a different colour. Only retain an image
+    # tied to the selected variant in literal Shopify product JSON.
+    item = {**item, "sku": offer.get("sku", item.get("sku", "")), "image": None}
+    handle = urlsplit(resolved.url).path.split("/products/")[-1]
+    for script in soup.find_all("script"):
+        text = script.get_text()
+        try:
+            if script.get("type") == "application/json" and str(script.get("id", "")).startswith(
+                "ProductJson"
+            ):
+                data = json.loads(text)
+            else:
+                assignment = re.search(r"\bvar\s+json_product\s*=\s*(\{)", text)
+                if not assignment:
+                    continue
+                data, _ = json.JSONDecoder().raw_decode(text, assignment.start(1))
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(data, dict) or data.get("handle") != handle:
+            continue
+        variants = data.get("variants", [])
+        if not isinstance(variants, list):
+            continue
+        matches = [v for v in variants if isinstance(v, dict) and str(v.get("id")) == selected]
+        if len(matches) != 1 or matches[0].get("sku") != item["sku"]:
+            continue
+        image = matches[0].get("featured_image")
+        if isinstance(image, dict) and isinstance(image.get("src"), str):
+            item["image"] = urljoin(resolved.url, image["src"])
+        break
+    if name:
+        name = re.split(r"\s+-\s+(?:Sold out|Rs\.)", str(name), flags=re.I)[0].strip()
+        item = {**item, "color": name, "name": item["name"] + " (" + name + ")"}
+    return item, offer, resolved
+
+
 def parse_listing(html: str, target: Target) -> Listing:
     soup = BeautifulSoup(html, "html.parser")
     if soup.select_one('form[action*="validateCaptcha"], #captchacharacters'):
@@ -320,8 +441,11 @@ def parse_listing(html: str, target: Target) -> Listing:
             products.extend(
                 item
                 for item in schema_objects(json.loads(script.get_text()))
-                if item.get("@type") == "Product"
-                or (isinstance(item.get("@type"), list) and "Product" in item["@type"])
+                if item.get("name")
+                and (
+                    item.get("@type") == "Product"
+                    or (isinstance(item.get("@type"), list) and "Product" in item["@type"])
+                )
             )
         except (ValueError, RecursionError):
             continue
@@ -331,6 +455,7 @@ def parse_listing(html: str, target: Target) -> Listing:
         and not target.external_id.startswith("itm")
     ):
         products = [item for item in products if str(item.get("sku", "")) == target.external_id]
+    products = consolidate_products(products)
     if len(products) == 1:
         item = products[0]
         if target.retailer == "iqoo":
@@ -341,9 +466,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                     "missing_variant", "iQOO did not serve the requested product SKU."
                 )
             target = target_for(target.url.split("?", 1)[0] + "?" + urlencode({"skuId": sku}))
-        offers = item.get("offers", {})
-        if isinstance(offers, list):
-            offers = offers[0] if len(offers) == 1 else {}
+        item, offers, target = selected_offer(item, soup, target)
         if isinstance(offers, dict) and offers.get("@type") != "AggregateOffer":
             price = paise(offers.get("price"))
             if price is not None and offers.get("priceCurrency") == "INR":
@@ -363,6 +486,8 @@ def parse_listing(html: str, target: Target) -> Listing:
                     )
                     if isinstance(item.get(key), (str, int))
                 }
+                if isinstance(item.get("size"), list) and len(item["size"]) == 1:
+                    attributes["size"] = str(item["size"][0])[:200]
                 title = str(item.get("name", "")).strip()
                 if not title:
                     raise LookupError("missing_product", "The page did not identify a product.")
@@ -378,6 +503,8 @@ def parse_listing(html: str, target: Target) -> Listing:
                 brand = item.get("brand", "")
                 if isinstance(brand, dict):
                     brand = brand.get("name", "")
+                if target.retailer == "boat" and str(brand).lower() == "boatlifestylein":
+                    brand = "boAt"
                 identity_title = title
                 heading = soup.select_one("h1") if target.retailer == "flipkart" else None
                 if heading and title in heading.get_text(" ", strip=True):
@@ -390,7 +517,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                         title = str(brand) + " " + identity_title
                     if color:
                         attributes["color"] = color.get_text(" ", strip=True)
-                attributes = mobile_attributes(identity_title, str(brand), attributes)
+                attributes = model_attributes(identity_title, str(brand), attributes)
                 availability = str(offers.get("availability", "")).split("/")[-1]
                 availability = {
                     "InStock": "in_stock",
@@ -440,6 +567,47 @@ def parse_listing(html: str, target: Target) -> Listing:
                     str(seller)[:150],
                     product_rating(item.get("aggregateRating")),
                 )
+        # A named product without offers can still start discovery. Record an
+        # unpriced check, never a zero-price offer or a made-up historical price.
+        if not offers:
+            brand = item.get("brand", "")
+            if isinstance(brand, dict):
+                brand = brand.get("name", "")
+            title = str(item.get("name", "")).strip()
+            if urlsplit(target.url).hostname in {"samsung.com", "www.samsung.com"}:
+                meta = soup.select_one('meta[name="title"]')
+                if meta and "Samsung India" in meta.get("content", ""):
+                    brand = "Samsung"
+                    title = "Samsung " + re.sub(
+                        r"^Buy\s+", "", meta["content"].split(" - Price", 1)[0]
+                    )
+            if isinstance(brand, str) and brand.strip() and title:
+                attributes = model_attributes(
+                    title,
+                    brand,
+                    {
+                        **{
+                            key: str(item[key])[:200]
+                            for key in ("sku", "model", "mpn", "color", "size")
+                            if isinstance(item.get(key), (str, int))
+                        },
+                        "listing_title": title[:250],
+                    },
+                )
+                return Listing(
+                    target,
+                    title[:250],
+                    brand[:100],
+                    str(item.get("category", "uncategorized"))[:80],
+                    attributes,
+                    safe_image(item.get("image"), urlsplit(target.url).hostname),
+                    None,
+                    None,
+                    "unknown",
+                    "unknown",
+                    "Seller not stated",
+                    product_rating(item.get("aggregateRating")),
+                )
     if target.retailer == "amazon":
         title = soup.select_one("#productTitle")
         asin = soup.select_one("input#ASIN")
@@ -459,7 +627,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                 if fraction:
                     visible += "." + fraction.get_text(strip=True)
                 amount = paise(visible)
-        if title and asin and asin.get("value") == target.external_id and amount is not None:
+        if title and asin and asin.get("value") == target.external_id:
             text = title.get_text(" ", strip=True)[:250]
             availability = soup.select_one("#availability")
             state = (
@@ -469,6 +637,8 @@ def parse_listing(html: str, target: Target) -> Listing:
             )
             if availability and "currently unavailable" in availability.get_text().lower():
                 state = "out_of_stock"
+            if amount is None and state == "in_stock":
+                state = "unknown"
             byline = soup.select_one("#bylineInfo")
             brand_match = (
                 re.fullmatch(
@@ -512,7 +682,7 @@ def parse_listing(html: str, target: Target) -> Listing:
                 text,
                 brand[:100],
                 "uncategorized",
-                mobile_attributes(text, brand, {"listing_title": text, "asin": target.external_id}),
+                model_attributes(text, brand, {"listing_title": text, "asin": target.external_id}),
                 safe_image(image.get("data-old-hires") or image.get("src")) if image else None,
                 amount,
                 None,
@@ -577,6 +747,55 @@ def search_store(retailer: str, query: str) -> dict:
 
         terms = tokens(query)
         items = {}
+        if retailer in {"sony", "boat"}:
+            # Shopify can render search cards through JavaScript. Read only its
+            # literal JSON catalog metadata, never execute scripts or trust prices.
+            for script in soup.select("script"):
+                content = script.get_text()
+                match = re.search(r"\bvar meta\s*=\s*", content[:1_000_000])
+                if not match:
+                    continue
+                try:
+                    metadata, _ = json.JSONDecoder().raw_decode(content[match.end() :])
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(metadata, dict) or not isinstance(metadata.get("products"), list):
+                    continue
+                for product in metadata["products"][:50]:
+                    if not isinstance(product, dict):
+                        continue
+                    handle = product.get("handle", "")
+                    variants = product.get("variants", [])
+                    if not re.fullmatch(r"[a-zA-Z0-9-]{1,100}", str(handle)) or not isinstance(
+                        variants, list
+                    ):
+                        continue
+                    for variant in variants[:2]:
+                        if not isinstance(variant, dict):
+                            continue
+                        title, variant_id = variant.get("name", ""), str(variant.get("id", ""))
+                        if (
+                            not isinstance(title, str)
+                            or not terms.issubset(tokens(title))
+                            or not variant_id.isdigit()
+                        ):
+                            continue
+                        target = target_for(
+                            urljoin(search_url, "/products/" + handle)
+                            + "?"
+                            + urlencode({"variant": variant_id})
+                        )
+                        items[(target.external_id, target.url)] = {
+                            "title": title[:250],
+                            "url": target.url,
+                            "variant_attributes": model_attributes(
+                                title, str(product.get("vendor", "")), {}
+                            ),
+                            "retailer": retailer,
+                            "retailer_name": STORES[retailer][0],
+                        }
+                    if len(items) >= 6:
+                        break
         for anchor in soup.select("a[href]"):
             try:
                 target = target_for(urljoin(search_url, anchor["href"]))
@@ -605,7 +824,7 @@ def search_store(retailer: str, query: str) -> dict:
                     "retailer": retailer,
                     "retailer_name": STORES[retailer][0],
                 }
-            if len(items) >= 6:
+            if len(items) >= 12:
                 break
         return {
             "retailer": retailer,

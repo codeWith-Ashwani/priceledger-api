@@ -41,7 +41,16 @@ def listing(retailer="flipkart", price=100000, **extras):
 
 
 def test_registry_is_configurable_and_category_aware(monkeypatch):
-    assert discovery_retailers() == ["amazon", "flipkart", "meesho", "croma", "reliance", "iqoo"]
+    assert discovery_retailers() == [
+        "amazon",
+        "flipkart",
+        "meesho",
+        "croma",
+        "reliance",
+        "iqoo",
+        "sony",
+        "boat",
+    ]
     assert discovery_retailers("grocery") == ["amazon", "flipkart", "meesho"]
     monkeypatch.setattr(get_settings(), "discovery_retailers", ["croma", "amazon", "croma"])
     assert discovery_retailers("mobile") == ["croma", "amazon"]
@@ -184,7 +193,7 @@ def test_wrong_variant_and_wrong_retailer_cannot_join_verified_cards(client, db,
 
     monkeypatch.setattr("app.comparison.discover_store", discover)
     result = scan_comparison(db, anchor_id)
-    assert result["stores"][0]["items"][0]["match_status"] == "different_variant"
+    assert result["stores"][0]["items"][0]["match_status"] == "model_match"
     assert all(not store["items"] for store in result["stores"][1:])
     assert len(client.get(f"/api/v1/products/{anchor_id}").json()["offers"]) == 1
 

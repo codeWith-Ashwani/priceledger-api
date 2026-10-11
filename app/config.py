@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     admin_token: str = ""
     demo_mode: bool = False
     discovery_retailers: list[
-        Literal["amazon", "flipkart", "meesho", "croma", "reliance", "iqoo"]
+        Literal["amazon", "flipkart", "meesho", "croma", "reliance", "iqoo", "sony", "boat"]
     ] = [
         "amazon",
         "flipkart",
@@ -21,6 +21,8 @@ class Settings(BaseSettings):
         "croma",
         "reliance",
         "iqoo",
+        "sony",
+        "boat",
     ]
     lookup_cache_minutes: int = Field(default=15, ge=1, le=1440)
     lookup_requests_per_minute: int = Field(default=12, ge=1, le=1000)

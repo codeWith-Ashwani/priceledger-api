@@ -54,11 +54,11 @@ def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
         "nokia",
         "honor",
     }
-    explicit_memory = "ram_gb" in result and "storage_gb" in result
     if (
-        "phone" in title.lower() or (phone_brand and explicit_memory and re.search(r"\d", title))
+        re.search(r"\bphone\b", title, re.I)
+        or (phone_brand and "storage_gb" in result and re.search(r"\d", title))
     ) and not re.search(
-        r"\b(?:cover|case|charger|protector|cable|laptop|notebook|tablet|tab|pad|book|ssd)\b",
+        r"\b(?:cover|case|charger|protector|cable|laptop|notebook|tablet|tab|pad|book|ssd|headphones?|earbuds?|headset)\b",
         title,
         re.I,
     ):
@@ -74,6 +74,84 @@ def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
         result.setdefault("model", base.strip(" (,|-"))
         result["identity_category"] = "mobile"
     return result
+
+
+def model_attributes(title: str, brand: str, attributes: dict) -> dict:
+    """Extract a model identifier, keeping colour/capacity as variant metadata."""
+    result = {**mobile_attributes(title, brand, {}), **attributes}
+    if result.get("identity_category") == "mobile" and re.search(
+        r"\b(?:headphones?|earbuds?|headset)\b", title, re.I
+    ):
+        result.pop("identity_category", None)
+        result.pop("model", None)
+    if result.get("identity_category") == "mobile":
+        return result
+    base = re.sub(r"^" + re.escape(brand) + r"\s*", "", title, flags=re.I)
+    # Schema model fields can contain the entire marketing title (Reliance).
+    supplied = str(result.get("model", ""))
+    if supplied:
+        result["model"] = re.split(r"[,|]", supplied, maxsplit=1)[0].strip()
+    prefix = re.split(r"[,|()]", base, maxsplit=1)[0].strip()
+    code = re.match(
+        r"((?:[A-Za-z][A-Za-z -]{0,35}\s+)?[A-Za-z]{1,24}(?:-[A-Za-z]{1,8})?[- ]?\d{1,5}[A-Za-z]?(?:[-/]\d{1,4})?(?:\s+(?:Pro|Plus|Lite|Ultra|Max|ANC|[2345]G|v\d+|Gen(?:eration)?[- ]?\d+|Mark[- ]?\d+))?)\b",
+        prefix,
+    )
+    if code and not re.search(r"\b(?:size|pack|of|hours?|mah|watts?)\s*\d", code[1], re.I):
+        derived = code[1].strip()
+        unqualified = re.sub(
+            r"\s+(?:Pro|Plus|Lite|Ultra|Max|ANC|[2345]G|v\d+|Gen(?:eration)?[- ]?\d+|Mark[- ]?\d+)$",
+            "",
+            derived,
+            flags=re.I,
+        )
+        # Older parsers omitted generation qualifiers. Restore them in matching
+        # metadata without rewriting historical observation snapshots.
+        if not supplied or normalized(result["model"]) == normalized(unqualified):
+            result["model"] = derived
+    return result
+
+
+def model_key(value) -> str:
+    # Charging wattage is a retailer naming addition, not a model generation.
+    return normalized(re.sub(r"\b\d{1,3}W\b", "", str(value), flags=re.I))
+
+
+def match_model(left, right) -> dict:
+    """Model comparisons may contain variants; they never create history links."""
+    exact = match_variant(left, right)
+    if exact["status"] == "verified":
+        return {**exact, "differences": []}
+    brand = normalized(left.brand)
+    if not brand or brand == "brandnotstated" or brand != normalized(right.brand):
+        return {"status": "review", "reason": "Brand identity is not confirmed."}
+    a = model_attributes(left.title, left.brand, left.attributes)
+    b = model_attributes(right.title, right.brand, right.attributes)
+    accessory = r"\b(?:case|cover|protector|replacement|earpads|skin|sleeve)\b"
+    if bool(re.search(accessory, left.title, re.I)) != bool(
+        re.search(accessory, right.title, re.I)
+    ):
+        return {"status": "different_variant", "reason": "An accessory is a different product."}
+    if not a.get("model") or not b.get("model"):
+        return exact
+    if model_key(a["model"]) != model_key(b["model"]):
+        return {"status": "different_variant", "reason": "Different model."}
+    # Do not rank used/refurbished stock against new or unknown condition.
+    if left.condition != right.condition and {left.condition, right.condition} & {
+        "used",
+        "refurbished",
+    }:
+        return {"status": "different_variant", "reason": "Different product condition."}
+    differences = [
+        {"attribute": key, "requested": a[key], "offered": b[key]}
+        for key in ("color", "size", "ram_gb", "storage_gb", "pack", "mpn")
+        if key in a and key in b and normalized(a[key]) != normalized(b[key])
+    ]
+    return {
+        "status": "model_match",
+        "method": "brand_model",
+        "reason": "Same brand and model. Variant details may differ; history stays separate.",
+        "differences": differences,
+    }
 
 
 def valid_gtin(value) -> str | None:

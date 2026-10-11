@@ -128,7 +128,8 @@ def test_uncertain_matches_never_enter_cheapest_price_or_history(client, db, mon
         "app.comparison.discover_store", lambda retailer, query, expected=None: discovery(right)
     )
     result = scan_comparison(db, product_id)
-    assert result["stores"][0]["items"][0]["match_status"] == "review"
+    assert result["stores"][0]["items"][0]["match_status"] == "model_match"
+    assert result["model_offers"][0]["condition"] == "unknown"
     assert db.scalar(select(func.count()).select_from(ProductMatch)) == 0
     assert len(client.get(f"/api/v1/products/{product_id}").json()["offers"]) == 1
     assert client.get(f"/api/v1/products/{product_id}").json()["best_price_paise"] == 3699900

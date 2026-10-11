@@ -267,6 +267,9 @@ def test_redirect_cannot_escape_retailer_allowlist(monkeypatch):
         def __init__(self, *args):
             pass
 
+        def connect(self):
+            pass
+
         def request(self, *args, **kwargs):
             pass
 

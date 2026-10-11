@@ -58,7 +58,21 @@ def fetch_public(url: str, validate_url) -> tuple[str, str]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise PublicFetchError("The store lookup timed out.")
-        connection = PinnedHTTPSConnection(parsed.hostname, addresses[0], min(10, remaining))
+        # Prefer IPv4 where IPv6 is advertised without a working local route.
+        # Retry connections only; an HTTP refusal is never retried on another IP.
+        addresses.sort(key=lambda address: ipaddress.ip_address(address).version)
+        for index, address in enumerate(addresses[:3]):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PublicFetchError("The store lookup timed out.")
+            connection = PinnedHTTPSConnection(parsed.hostname, address, min(10, remaining))
+            try:
+                connection.connect()
+                break
+            except OSError as exc:
+                connection.close()
+                if isinstance(exc, ssl.SSLError) or index == min(len(addresses), 3) - 1:
+                    raise
         try:
             connection.request(
                 "GET",
@@ -106,7 +120,7 @@ def fetch_public(url: str, validate_url) -> tuple[str, str]:
                 chunk = response.read(65536)
                 if not chunk:
                     break
-                if len(body) + len(chunk) > 3_000_000:
+                if len(body) + len(chunk) > 8_000_000:
                     raise PublicFetchError(
                         "The store page exceeds the lookup size limit.", "page_too_large"
                     )

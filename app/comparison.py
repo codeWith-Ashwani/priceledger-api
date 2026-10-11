@@ -3,15 +3,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.catalog import approved_sources, get_product
+from app.catalog import approved_sources, get_product, offers_for
 from app.collection import record_attempt, reserve_requests
 from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
-from app.identity import match_variant, mobile_attributes
+from app.identity import match_model, match_variant, model_attributes, model_key
 from app.limits import lookup_limit
 from app.lookup import reserve_stores, store_listing
 from app.models import ComparisonScan, Offer, Product, ProductMatch, Source
@@ -83,9 +84,9 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
         product.title,
         product.brand,
         product.category,
-        {**mobile_attributes(product.title, product.brand, {}), **product.attributes},
+        model_attributes(product.title, product.brand, product.attributes),
         product.image_url,
-        offer.current_item_paise or 0,
+        offer.current_item_paise,
         offer.current_shipping_paise,
         offer.availability,
         offer.condition,
@@ -94,8 +95,17 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
 
 
 def candidate_priority(item: dict, expected: dict) -> tuple[int, int]:
-    actual = {**mobile_attributes(item["title"], "", {}), **item.get("variant_attributes", {})}
+    actual = model_attributes(item["title"], str(expected.get("_brand", "")), {})
+    actual.update(
+        {key: value for key, value in item.get("variant_attributes", {}).items() if key != "model"}
+    )
     conflicts, agreements = 0, 0
+    if (
+        actual.get("model")
+        and expected.get("model")
+        and model_key(actual["model"]) != model_key(expected["model"])
+    ):
+        conflicts += 10
     for key in ("ram_gb", "storage_gb", "color"):
         if key in actual and key in expected:
             if str(actual[key]).lower() == str(expected[key]).lower():
@@ -106,13 +116,44 @@ def candidate_priority(item: dict, expected: dict) -> tuple[int, int]:
 
 
 def discovery_query(anchor: Listing) -> str:
-    model = anchor.attributes.get("model")
+    model = model_attributes(anchor.title, anchor.brand, anchor.attributes).get("model")
     if model:
         # Charging/connectivity labels are optional search terms, never ignored
         # during exact identity verification.
         model = re.sub(r"\b(?:\d{1,3}W|[2345]G)\b", "", str(model), flags=re.I)
         return re.sub(r"\s+", " ", f"{anchor.brand} {model}").strip()[:128]
     return anchor.title.split("|", 1)[0][:128]
+
+
+def model_offers(db: Session, product_id: str, anchor: Listing) -> list[dict]:
+    rows = db.execute(
+        select(Product, Offer)
+        .join(Offer, Offer.product_id == Product.id)
+        .join(Source, Offer.source_id == Source.id)
+        .where(
+            Product.id != product_id,
+            Product.is_demo.is_(False),
+            func.lower(Product.brand) == anchor.brand.lower(),
+            Offer.product_url.is_not(None),
+            *approved_sources(),
+        )
+        .order_by(Offer.current_observed_at.desc())
+        .limit(100)
+    ).all()
+    decisions = {}
+    for product, offer in rows:
+        try:
+            decision = match_model(anchor, listing_from_record(product, offer))
+        except LookupError:
+            continue
+        if decision["status"] == "model_match":
+            decisions[product.id] = decision
+    grouped = offers_for(db, list(decisions))
+    return [
+        {**offer, "match_scope": "model", "differences": decisions[member]["differences"]}
+        for member, offers in grouped.items()
+        for offer in offers
+    ]
 
 
 def discover_store(retailer: str, query: str, expected: dict | None = None) -> dict:
@@ -152,7 +193,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     ]
     if (
         existing
-        and existing.result.get("discovery_version") == 2
+        and existing.result.get("discovery_version") == 8
         and existing.result.get("discovery_retailers") == selected
         and utc(existing.checked_at) > now() - timedelta(minutes=15)
     ):
@@ -170,7 +211,13 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             )
             if offer:
                 link_catalog_matches(db, product_id, listing_from_record(product, offer))
-            return {**existing.result, "cached": True}
+            return {
+                **existing.result,
+                "model_offers": model_offers(db, product_id, listing_from_record(product, offer))
+                if offer
+                else [],
+                "cached": True,
+            }
     offer = db.scalar(
         select(Offer)
         .where(Offer.product_id == product_id, Offer.product_url.is_not(None))
@@ -207,7 +254,12 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     permitted, limited = reserve_stores(db, retailers, cost=3)
     with ThreadPoolExecutor(max_workers=3) as pool:
         discoveries = list(
-            pool.map(lambda retailer: discover_store(retailer, query, anchor.attributes), permitted)
+            pool.map(
+                lambda retailer: discover_store(
+                    retailer, query, {**anchor.attributes, "_brand": anchor.brand}
+                ),
+                permitted,
+            )
         )
     by_store = dict(zip(permitted, discoveries, strict=True))
     discovered = [
@@ -232,13 +284,19 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             )
         db.commit()
         items = []
+        seen_listings = set()
         for candidate in discovery["listings"]:
             if candidate.target.retailer != retailer:
                 discovery["failures"].append(
                     "The search returned a listing from another retailer; it was excluded."
                 )
                 continue
+            identity = candidate.target.external_id or candidate.target.url
+            if identity in seen_listings:
+                continue
+            seen_listings.add(identity)
             decision = match_variant(anchor, candidate)
+            model_decision = match_model(anchor, candidate)
             try:
                 candidate_id = store_listing(db, candidate)
                 source_ids.add("public-page:" + candidate.target.retailer)
@@ -265,8 +323,9 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                         "shipping_paise": candidate.shipping_paise,
                         "availability": candidate.availability,
                         "condition": candidate.condition,
-                        "match_status": decision["status"],
-                        "reason": decision["reason"],
+                        "match_status": model_decision["status"],
+                        "reason": model_decision["reason"],
+                        "differences": model_decision.get("differences", []),
                         "observed_at": now().isoformat(),
                         "source_name": store_info(candidate.target)[0] + " product page",
                     }
@@ -279,12 +338,15 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                     else "This listing is being updated; retry later."
                 )
         verified = sum(item["match_status"] == "verified" for item in items)
+        models = sum(item["match_status"] == "model_match" for item in items)
         stores.append(
             {
                 "retailer": retailer,
                 "retailer_name": STORES[retailer][0],
                 "status": "verified"
                 if verified
+                else "model_match"
+                if models
                 else "review"
                 if any(item["match_status"] == "review" for item in items)
                 else "different_variant"
@@ -294,6 +356,8 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                 else "no_verified_match",
                 "message": f"{verified} matching offer(s) joined the comparison."
                 if verified
+                else f"{models} same-model offer(s) found. Variant histories stay separate."
+                if models
                 else "Possible matches have separate histories until their variant is verified."
                 if any(item["match_status"] == "review" for item in items)
                 else "These readable listings are different variants and are excluded from the comparison."
@@ -311,16 +375,19 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                 "items": items,
             }
         )
-    result = {
-        "product_id": product_id,
-        "stores": stores,
-        "checked_at": now().isoformat(),
-        "cached": False,
-        "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
-        "source_ids": sorted(source_ids),
-        "discovery_retailers": retailers,
-        "discovery_version": 2,
-    }
+    result = jsonable_encoder(
+        {
+            "product_id": product_id,
+            "stores": stores,
+            "checked_at": now().isoformat(),
+            "cached": False,
+            "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
+            "source_ids": sorted(source_ids),
+            "discovery_retailers": retailers,
+            "discovery_version": 8,
+            "model_offers": model_offers(db, product_id, anchor),
+        }
+    )
     if lease_token:
         fence_comparison(db, product_id, lease_token)
     scan = db.get(ComparisonScan, product_id)

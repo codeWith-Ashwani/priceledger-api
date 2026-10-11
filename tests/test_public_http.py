@@ -1,4 +1,5 @@
 import socket
+import ssl
 
 import pytest
 
@@ -96,6 +97,9 @@ def pinned_transport(monkeypatch):
             self.response = responses.pop(0)
             connections.append(self)
 
+        def connect(self):
+            pass
+
         def request(self, method, path, headers):
             self.method, self.path, self.headers = method, path, headers
 
@@ -192,7 +196,7 @@ def test_dedicated_store_private_dns_is_rejected_before_connection(monkeypatch):
     [
         ({"Content-Type": "application/json"}, b"{}", "invalid_page"),
         ({"Content-Type": "text/html", "Content-Encoding": "gzip"}, b"compressed", "invalid_page"),
-        ({"Content-Type": "text/html"}, b"x" * 3_000_001, "page_too_large"),
+        ({"Content-Type": "text/html"}, b"x" * 8_000_001, "page_too_large"),
     ],
     ids=["wrong-media-type", "compressed-response", "oversized-response"],
 )
@@ -202,3 +206,49 @@ def test_pinned_transport_rejects_invalid_or_unbounded_pages(pinned_transport, h
     with pytest.raises(LookupError) as failure:
         fetch_page("https://www.flipkart.com/test/p/itm123", "flipkart")
     assert failure.value.code == code and connections[0].closed
+
+
+def test_ipv4_is_preferred_when_dns_advertises_both_families(pinned_transport, monkeypatch):
+    Response, responses, connections = pinned_transport
+    responses.append(Response())
+    monkeypatch.setattr(
+        "app.public_http.public_addresses",
+        lambda host: ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"],
+    )
+    fetch_page("https://www.amazon.in/dp/B012345678", "amazon")
+    assert len(connections) == 1 and connections[0].address == "93.184.216.34"
+
+
+@pytest.mark.parametrize("failure", [OSError("no route"), ssl.SSLError("bad certificate")])
+def test_connection_fallback_does_not_retry_tls_failures(pinned_transport, monkeypatch, failure):
+    from app import public_http
+
+    Response, responses, connections = pinned_transport
+    responses.extend([Response(), Response()])
+    monkeypatch.setattr(
+        public_http, "public_addresses", lambda host: ["93.184.216.34", "93.184.216.35"]
+    )
+
+    def connect(connection):
+        if connection.address == "93.184.216.34":
+            raise failure
+
+    monkeypatch.setattr(public_http.PinnedHTTPSConnection, "connect", connect)
+    if isinstance(failure, ssl.SSLError):
+        with pytest.raises(LookupError):
+            fetch_page("https://www.amazon.in/dp/B012345678", "amazon")
+        assert len(connections) == 1
+    else:
+        fetch_page("https://www.amazon.in/dp/B012345678", "amazon")
+        assert len(connections) == 2 and connections[0].closed
+
+
+def test_http_refusal_never_tries_another_address(pinned_transport, monkeypatch):
+    Response, responses, connections = pinned_transport
+    responses.append(Response(status=403))
+    monkeypatch.setattr(
+        "app.public_http.public_addresses", lambda host: ["93.184.216.34", "93.184.216.35"]
+    )
+    with pytest.raises(LookupError) as failure:
+        fetch_page("https://www.amazon.in/dp/B012345678", "amazon")
+    assert failure.value.code == "retailer_blocked" and len(connections) == 1

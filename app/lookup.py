@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.collection import public_source, record_attempt, reserve_requests, touch_offer, track_offer
 from app.config import get_settings
 from app.db import get_db, now, utc
+from app.identity import model_attributes
 from app.ingestion import ingest
 from app.limits import lookup_limit
 from app.models import Offer, Product, Retailer, Source
@@ -56,20 +58,25 @@ def store_listing(
             )
         )
     product = db.get(Product, product_id)
+    previous_attributes = product.attributes if product else {}
+    if previous_attributes.get("identity_category") == "mobile" and re.search(
+        r"\b(?:headphones?|earbuds?|headset)\b", product.title, re.I
+    ):
+        previous_attributes = model_attributes(product.title, product.brand, previous_attributes)
     if product is None:
         product = Product(
             id=product_id,
             title=listing.title,
             brand=listing.brand,
             category=listing.category,
-            variant_label=listing.title,
+            variant_label=listing.title[:200],
             attributes=listing.attributes,
             illustration="product",
             image_url=listing.image_url,
             is_demo=False,
         )
         db.add(product)
-    elif any(listing.attributes.get(key) != value for key, value in product.attributes.items()):
+    elif any(listing.attributes.get(key) != value for key, value in previous_attributes.items()):
         # A changed retailer variant must not silently overwrite the tracked identity.
         raise LookupError(
             "variant_changed",
@@ -190,7 +197,9 @@ def lookup_link(db: Session, query: str) -> dict:
         "kind": "product",
         "product_id": product_id,
         "cached": False,
-        "message": "A real retailer-page price was recorded. Earlier history is only shown if recorded evidence exists.",
+        "message": "A real retailer-page price was recorded. Earlier history is only shown if recorded evidence exists."
+        if listing.item_paise is not None
+        else "Product identified, but this store did not expose a current price. Checking other stores for this model.",
     }
 
 
