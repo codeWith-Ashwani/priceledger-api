@@ -47,6 +47,12 @@ HOSTS = {
     "www.boat-lifestyle.com": "boat",
 }
 SHORT_HOSTS = {"amzn.in", "amzn.to", "fkrt.it", "dl.flipkart.com"}
+# Search origins only: products, prices and availability still require live page evidence.
+# Keep generic retailer IDs stable so existing permissions and histories remain effective.
+SHOPIFY_ORIGINS = {
+    "iplanet.one": ("iPlanet", "Apple"),
+    "imagineonline.store": ("Imagine", "Apple"),
+}
 IMAGE_HOSTS = {
     "m.media-amazon.com",
     "images-eu.ssl-images-amazon.com",
@@ -121,7 +127,8 @@ def retailer_key(host: str) -> str:
 def store_info(target: Target) -> tuple[str, str]:
     if target.retailer in STORES:
         return STORES[target.retailer][:2]
-    return urlsplit(target.url).hostname.removeprefix("www."), "#155c45"
+    host = urlsplit(target.url).hostname.removeprefix("www.")
+    return SHOPIFY_ORIGINS.get(host, (host, ""))[0], "#155c45"
 
 
 def allowed_url(value: str, retailer: str | None = None) -> str:
@@ -436,7 +443,66 @@ def selected_offer(item: dict, soup: BeautifulSoup, target: Target) -> tuple[dic
     if not isinstance(offers, list):
         return item, offers if isinstance(offers, dict) else {}, target
     if len(offers) == 1:
-        return item, offers[0] if isinstance(offers[0], dict) else {}, target
+        offer = offers[0] if isinstance(offers[0], dict) else {}
+        requested = parse_qs(urlsplit(target.url).query).get("variant", [None])[0]
+        url = offer.get("url")
+        selected = (
+            parse_qs(urlsplit(url).query).get("variant", [None])[0]
+            if isinstance(url, str)
+            else None
+        )
+        if selected:
+            resolved = target_for(url)
+            if (
+                resolved.retailer != target.retailer
+                or urlsplit(resolved.url).path != urlsplit(target.url).path
+                or (requested and requested != selected)
+            ):
+                raise LookupError(
+                    "missing_variant", "The offer belongs to a different product variant."
+                )
+            data = shopify_product(soup, resolved)
+            variants = (
+                [
+                    v
+                    for v in data["variants"][:500]
+                    if isinstance(v, dict) and str(v.get("id")) == selected
+                ]
+                if data
+                else []
+            )
+            if len(variants) == 1:
+                variant = variants[0]
+                if item.get("sku") and variant.get("sku") and item["sku"] != variant["sku"]:
+                    raise LookupError(
+                        "missing_variant",
+                        "Selected variant identifiers disagree on the retailer page.",
+                    )
+                if "price" in variant and (
+                    not isinstance(variant["price"], int)
+                    or isinstance(variant["price"], bool)
+                    or paise(offer.get("price")) != variant["price"]
+                ):
+                    raise LookupError(
+                        "ambiguous_price",
+                        "Selected variant prices disagree on the retailer page. No price was recorded.",
+                    )
+                if (
+                    not item.get("sku")
+                    and isinstance(variant.get("sku"), str)
+                    and variant["sku"]
+                    and isinstance(variant.get("price"), int)
+                    and not isinstance(variant["price"], bool)
+                    and offer.get("priceCurrency") == "INR"
+                    and paise(offer.get("price")) == variant["price"]
+                ):
+                    item = {**item, "sku": variant["sku"]}
+            return item, offer, resolved
+        if requested and shopify_product(soup, target):
+            raise LookupError(
+                "missing_variant", "The store did not identify the selected variant price."
+            )
+        return item, offer, target
     requested = parse_qs(urlsplit(target.url).query).get("variant", [None])[0]
     options = soup.select('form[action*="cart/add"] select[name="id"] option[selected]')
     ids = {node.get("value") for node in options}
@@ -869,9 +935,32 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
                 "search_url": search_url,
                 "items": [],
             }
-    parameters = {"k" if retailer == "amazon" else "q": query}
+    origin = SHOPIFY_ORIGINS.get(urlsplit(base).hostname.removeprefix("www."))
+    search_query = query
+    if custom and origin and re.match(re.escape(origin[1]) + r"\s+", query, re.I):
+        model = re.sub(r"^" + re.escape(origin[1]) + r"\s+", "", query, flags=re.I)
+        if re.fullmatch(r"[a-zA-Z0-9 -]{1,100}", model):
+            # Shopify's default broad search includes accessories and other models.
+            exclusions = [
+                word
+                for word in (
+                    "pro",
+                    "max",
+                    "plus",
+                    "ultra",
+                    "case",
+                    "cover",
+                    "protector",
+                    "applecare",
+                    "preowned",
+                )
+                if word not in model.lower().split()
+            ]
+            search_query = '"' + model + '" ' + " ".join("-" + word for word in exclusions)
+    parameters = {"k" if retailer == "amazon" else "q": search_query}
     if custom:
         parameters["type"] = "product"
+        parameters["options[unavailable_products]"] = "last"
     search_url = base + urlencode(parameters)
     try:
         html, _ = fetch_page(search_url, retailer)
@@ -912,7 +1001,9 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
                         title, variant_id = variant.get("name", ""), str(variant.get("id", ""))
                         if (
                             not isinstance(title, str)
-                            or not terms.issubset(tokens(title))
+                            or not terms.issubset(
+                                tokens(title + " " + str(product.get("vendor", "")))
+                            )
                             or not variant_id.isdigit()
                         ):
                             continue

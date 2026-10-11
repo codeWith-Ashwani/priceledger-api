@@ -2,6 +2,13 @@
 
 import re
 
+COLORS = r"mist blue|lavender|sage|blue|black|white|green|pink|red|silver|grey|gray|yellow|purple"
+
+
+def bundle_signature(title: str) -> frozenset[str]:
+    """Explicit extra products/services, never ordinary 'with A19 chip' marketing."""
+    return frozenset(re.findall(r"\b(?:applecare|protect\+|bundle|combo)(?=\W|$)", title.lower()))
+
 
 def normalized(value) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
@@ -30,9 +37,7 @@ def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
         ):
             result["color"] = first
     if "color" not in result:
-        colors = re.findall(
-            r"\b(blue|black|white|green|pink|red|silver|grey|gray|yellow|purple)\b", title.lower()
-        )
+        colors = re.findall(rf"\b({COLORS})\b", title.lower())
         if len(set(colors)) == 1:
             result["color"] = colors[0]
     # Phones only: never apply these heuristics to clothing, packs or accessories.
@@ -64,7 +69,7 @@ def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
     ):
         model_title = title[: variant.start()] if variant else title
         base = re.split(
-            r"\((?=\s*(?:\d+\s*GB|blue|black|white|green|pink|red))|\b\d+\s*GB|\b(?:blue|black|white|green|pink|red|silver|grey|gray)\b",
+            rf"\((?=\s*(?:\d+\s*GB|{COLORS}))|\b\d+\s*GB|\b(?:{COLORS})\b",
             model_title.split("|", 1)[0],
             maxsplit=1,
             flags=re.I,
@@ -118,6 +123,8 @@ def model_key(value) -> str:
 
 def match_model(left, right) -> dict:
     """Model comparisons may contain variants; they never create history links."""
+    if bundle_signature(left.title) != bundle_signature(right.title):
+        return {"status": "different_variant", "reason": "Different product or protection bundle."}
     exact = match_variant(left, right)
     if exact["status"] == "verified":
         return {**exact, "differences": []}
@@ -165,6 +172,8 @@ def valid_gtin(value) -> str | None:
 
 
 def match_variant(left, right) -> dict:
+    if bundle_signature(left.title) != bundle_signature(right.title):
+        return {"status": "different_variant", "reason": "Different product or protection bundle."}
     a, b = left.attributes, right.attributes
     brand_a, brand_b = normalized(left.brand), normalized(right.brand)
     conflicts = []

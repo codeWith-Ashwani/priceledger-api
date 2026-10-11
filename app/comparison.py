@@ -13,7 +13,7 @@ from app.collection import record_attempt, reserve_requests
 from app.coordination import claim_comparison, fence_comparison, release_comparison
 from app.db import get_db, now, utc
 from app.discovery import registered_stores
-from app.identity import match_model, match_variant, model_attributes, model_key
+from app.identity import bundle_signature, match_model, match_variant, model_attributes, model_key
 from app.limits import lookup_limit
 from app.lookup import reserve_stores, store_listing
 from app.models import ComparisonScan, Offer, Product, ProductMatch, Source
@@ -96,7 +96,7 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
     )
 
 
-def candidate_priority(item: dict, expected: dict) -> tuple[int, int]:
+def candidate_priority(item: dict, expected: dict) -> tuple[int, int, int]:
     actual = model_attributes(item["title"], str(expected.get("_brand", "")), {})
     actual.update(
         {key: value for key, value in item.get("variant_attributes", {}).items() if key != "model"}
@@ -114,7 +114,19 @@ def candidate_priority(item: dict, expected: dict) -> tuple[int, int]:
                 agreements += 1
             else:
                 conflicts += 1
-    return conflicts, -agreements
+    incompatible = bundle_signature(item["title"]) != bundle_signature(
+        str(expected.get("listing_title", ""))
+    )
+    incompatible = incompatible or bool(
+        re.search(r"\b(?:case|cover|protector|replacement|skin|sleeve)\b", item["title"], re.I)
+    ) != bool(
+        re.search(
+            r"\b(?:case|cover|protector|replacement|skin|sleeve)\b",
+            str(expected.get("listing_title", "")),
+            re.I,
+        )
+    )
+    return int(incompatible), conflicts, -agreements
 
 
 def discovery_query(anchor: Listing) -> str:
@@ -200,7 +212,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     ]
     if (
         existing
-        and existing.result.get("discovery_version") == 9
+        and existing.result.get("discovery_version") == 10
         and existing.result.get("discovery_retailers") == selected
         and utc(existing.checked_at) > now() - timedelta(minutes=15)
     ):
@@ -402,7 +414,7 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
             "history_note": "Historical prices come from actual recorded or imported observations. A current page does not expose every past price.",
             "source_ids": sorted(source_ids),
             "discovery_retailers": retailers,
-            "discovery_version": 9,
+            "discovery_version": 10,
             "model_offers": model_offers(db, product_id, anchor),
         }
     )

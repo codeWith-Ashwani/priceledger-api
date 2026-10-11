@@ -77,7 +77,10 @@ def store_listing(
             is_demo=False,
         )
         db.add(product)
-    elif any(listing.attributes.get(key) != value for key, value in previous_attributes.items()):
+    elif any(
+        value is not None and value != "" and listing.attributes.get(key) != value
+        for key, value in previous_attributes.items()
+    ):
         # A changed retailer variant must not silently overwrite the tracked identity.
         raise LookupError(
             "variant_changed",
