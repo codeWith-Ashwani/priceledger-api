@@ -23,6 +23,8 @@ from app.http_safety import RequestSafetyMiddleware
 from app.ingestion import IngestionError, ingest
 from app.insights import router as insights_router
 from app.lookup import router as lookup_router
+from app.offline import owner_router as offline_owner_router
+from app.offline import router as offline_router
 from app.operations import router as operations_router
 from app.product_comparison import router as product_comparison_router
 from app.reports import owner_router as report_owner_router
@@ -50,6 +52,8 @@ app.include_router(operations_router)
 app.include_router(reports_router)
 app.include_router(report_owner_router)
 app.include_router(product_comparison_router)
+app.include_router(offline_router)
+app.include_router(offline_owner_router)
 
 
 @app.exception_handler(RequestValidationError)

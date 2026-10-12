@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     database_statement_timeout_ms: int = Field(default=30_000, ge=1000, le=120_000)
     database_lock_timeout_ms: int = Field(default=5000, ge=100, le=30_000)
     freshness_hours: int = Field(default=48, ge=1, le=168)
+    offline_freshness_days: int = Field(default=7, ge=1, le=30)
     history_gap_hours: int = Field(default=48, ge=1, le=168)
     max_history_observations: int = Field(default=10_000, ge=1000, le=100_000)
     collection_daily_budget: int = Field(default=500, ge=1, le=1_000_000)

@@ -75,6 +75,7 @@ All paths below use `/api/v1`. URL-encode IDs in paths.
 | `GET /products/{id}/insights?days=90&basis=item` | Recorded milestones, daily average and coverage |
 | `GET /products/{id}/assessment` | Historical reference, savings and insufficient-history status |
 | `GET /products/{id}/coverage` | Evidence counts, India days, source and collection state |
+| `GET /products/{id}/offline-quotes?condition=new&days=90&limit=10&offset=0` | Reviewed city-specific shop evidence and current sampled range |
 | `GET /categories` | Stored real-product categories |
 | `GET /health`, `GET /ready` | Liveness and migration-aware readiness |
 | `POST /ingest` | Authenticated same-source evidence ingestion |
@@ -127,6 +128,7 @@ Settings use the `PRICELEDGER_` prefix. Origins and retailer lists use JSON arra
 | `READ_REQUESTS_PER_MINUTE` | 120 | Public data-read quota |
 | `ADMIN_REQUESTS_PER_MINUTE` | 60 | Authenticated administration quota |
 | `REPORT_REQUESTS_PER_MINUTE` | 5 | Separate public report quota, range 1–60 |
+| `OFFLINE_FRESHNESS_DAYS` | 7 | Maximum age of a current shop quote, range 1–30 |
 | `MAX_HISTORY_OBSERVATIONS` | 10,000 | Global evidence ceiling per request/calculation |
 | `COLLECTION_DAILY_BUDGET` | 500 | Reserved operations per source/UTC day |
 | `COLLECTION_COOLDOWN_HOURS` | 6 | Source retry cooldown |
@@ -154,6 +156,10 @@ Set a server-only `PRICELEDGER_ADMIN_TOKEN`. Administrative requests require `X-
 | `GET /admin/reports?status=open&limit=25&offset=0` | Private issue queue, optionally filtered by review status |
 | `GET /admin/reports/{id}?limit=25&offset=0` | Captured evidence, issue details and paginated review audit |
 | `POST /admin/reports/{id}/review` | Update review status with an expected revision and private note |
+| `GET/POST /admin/offline/shops` | Paginated documented shops / permission-backed shop registration |
+| `GET/POST /admin/offline/quotes` | Paginated private queue / immutable exact-variant draft |
+| `GET /admin/offline/quotes/{id}` | Private evidence, shop identity and paginated review audit |
+| `POST /admin/offline/quotes/{id}/review` | Publish or withdraw with a UUID4 receipt and expected revision |
 
 Collection health is read-only: it neither contacts retailers nor starts jobs. Offer filters include `stale`, `failed`, `gap`, `due`, `paused`, `unscheduled` and `inactive`; pages accept 1–100 records. Missing/future-dated or older-than-`FRESHNESS_HOURS` quotes count as stale. A gap means no approved, past listing-price observation within `HISTORY_GAP_HOURS`; an unpriced identity check cannot close it. Due counts follow worker scheduling, source permissions, UTC daily budgets and cooldowns; leased jobs do not prove a worker process is alive. Source diagnostics include search failures even when no offer was created. Indexed latest-record queries and SQL aggregates avoid loading observation history or issuing one query per displayed offer.
 
@@ -168,6 +174,20 @@ Public reporting accepts `wrong_price`, `wrong_product`, `outdated_price`, `stoc
 The server captures its own offer, source, seller, variant and comparison snapshot. Reports preserve the quoted evidence even if the listing changes. Retrying the same identifier and normalized payload returns the original receipt (200); new reports return 201. Reusing an identifier with different details returns 409. Public responses contain only a receipt, with no public report lookup or private notes. Avoid personal/payment information in free text. Intake consumes its separate persisted client quota and never fetches retailers.
 
 Owner review statuses are `open`, `in_review`, `resolved` and `dismissed`; queue and audit pages accept 1–100 records. Reviews require `expected_revision`, `status` and an optional private `note` of up to 1,000 characters. Resolving/dismissing requires an explanation of at least five characters. Concurrent edits return 409; reload before retrying. Each change appends an audit event atomically with its revision. Reviewing a report does not modify prices, observations, matches or collection jobs. Verify and correct underlying evidence separately. Anonymous reports have no outbound notifications or user accounts.
+
+## Reviewed local shop quotes
+
+Offline evidence is owner-entered and reviewed; the API does not scrape or approximate offline prices. In the frontend owner workspace, open **Record and review local shop quotes**, register a documented shop with its city/state/area and permission reference, find an existing exact tracked product, record a private draft, then review the shop, product, price, dates and evidence before publishing. Use unconditional tax-inclusive INR item prices. No receipt image upload, anonymous shop intake or independent verification of an owner's attestations is provided. Keep personal/payment information out of references and notes.
+
+Shop registration requires `request_id` (UUID4), `name`, `city`, `state`, `area`, `approval_reference`, and explicit boolean `rights_confirmed: true`; `expires_at` optionally records an aware future permission deadline. Normalized shop/name/location uniqueness prevents duplicate registrations. Registration creates a separate merchant source. Permission metadata is private; administrative source operations can inspect it, and revoked/expired source permissions hide related public evidence.
+
+Quote creation requires `request_id`, `product_id`, `shop_id`, the complete current `variant_attributes`, strict integer `item_paise` (0–2,000,000,000), explicit boolean `in_stock`, `condition` (`new`, `used`, `refurbished`), aware past `observed_at`, later `valid_until` within 30 days, `evidence_reference`, and three explicit true attestations: `exact_variant_confirmed`, `includes_tax`, `unconditional_price`. Each immutable draft captures product identity and typed variant attributes. Publication rechecks variant identity and active product/shop source permissions. Expired historical evidence can be published but cannot count as current.
+
+Review requires a new UUID4 `request_id`, `expected_revision`, `action` (`publish` or `withdraw`), and a private 5–1,000 character `note`. Only drafts can be published; drafts or published quotes can be withdrawn, and withdrawal is final for that record. Record corrected evidence as a new draft. Every accepted transition atomically appends an audit event. Identical registration/draft/review retries return the original identity/receipt; conflicting reused identifiers or revisions return 409. Review retries return the original transition even if a later transition has occurred; reload detail for current status.
+
+Public reads require approved non-demo online identity evidence for the product. They accept `condition`, `city_id` (32-character ID from `cities`), `days` (1–3,650), `limit` (1–100) and `offset`. The default history is 90 days and the default city is the first sorted city with published evidence. City spelling/whitespace are normalized within the stated state; this is not a geocoding/pincode service. Each city/condition/variant remains separate. Public results expose documented shop name/area, price, observation/validity/review time and source; evidence references and audit notes stay private.
+
+The newest previously published observation per shop controls its current eligibility; a later withdrawal or out-of-stock observation cannot resurrect an older available quote. Withdrawn unpublished drafts do not supersede published evidence. A current quote must be in stock, unexpired, past-dated, variant-compatible and no older than `OFFLINE_FRESHNESS_DAYS`. At least two distinct documented shops are required for the sampled min/max range; fewer quotes produce null range bounds. SQL aggregates count eligible shops across the full city selection independently of history pagination. The range describes the documented sample, not the whole offline market, and is separate from online rankings, histories and deal assessments. Reads and reviews never contact retailers or modify online observations, matches or collection jobs. No offline quotes are seeded.
 
 ## Safeguards
 
@@ -188,7 +208,7 @@ uv run pytest -q
 uv run alembic check
 ```
 
-Unit tests use isolated databases and controlled source responses. Fixtures never seed the application. CI also verifies PostgreSQL migrations, concurrency, leases, backfills, streamed matching and report/review races. For local PostgreSQL checks, configure a **disposable** PostgreSQL database, migrate it and run `uv run pytest -q tests/test_postgres.py tests/test_report_concurrency.py`. Do not use the application database: integration tests create test records.
+Unit tests use isolated databases and controlled source responses. Fixtures never seed the application. CI also verifies PostgreSQL migrations, concurrency, leases, backfills, streamed matching, report reviews and shop registration/quote publication races. For local PostgreSQL checks, configure a **disposable** PostgreSQL database, migrate it and run `uv run pytest -q tests/test_postgres.py tests/test_report_concurrency.py tests/test_offline_concurrency.py`. Do not use the application database: integration tests create test records.
 
 Frontend browser checks combine intercepted contracts with genuine previously looked-up listings. Large suites use a separate database and temporary quota overrides, not reset application budgets/cooldowns.
 
@@ -203,6 +223,7 @@ Frontend browser checks combine intercepted contracts with genuine previously lo
 | `operations` | Authenticated read-only collection health and paginated diagnostics |
 | `reports` | Public issue receipts, immutable evidence snapshots and private review audits |
 | `product_comparison` | Bounded selection reads with independent exact-variant offers and source permissions |
+| `offline` | Documented shops, immutable draft quotes, publication/withdrawal receipts and city-specific sampled ranges |
 | `http_safety`, `limits`, `auth` | Request safeguards and administrative access |
 
 Both repositories remain private. README is the only repository documentation; research, sprint notes and QA artifacts remain local. Databases, credentials, environments and generated output are ignored by Git.

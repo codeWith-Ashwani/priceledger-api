@@ -27,6 +27,65 @@ class Source(Base):
     approval_reference: Mapped[str | None] = mapped_column(String(1000))
 
 
+class OfflineShop(Base):
+    __tablename__ = "offline_shops"
+    __table_args__ = (UniqueConstraint("location_key"), Index("ix_offline_shops_city", "city_id"))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
+    city: Mapped[str] = mapped_column(String(100))
+    state: Mapped[str] = mapped_column(String(100))
+    area: Mapped[str] = mapped_column(String(200))
+    city_id: Mapped[str] = mapped_column(String(32))
+    location_key: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class OfflineQuote(Base):
+    __tablename__ = "offline_quotes"
+    __table_args__ = (
+        CheckConstraint(
+            "item_paise >= 0 AND item_paise <= 2000000000", name="ck_offline_quote_price"
+        ),
+        CheckConstraint("revision >= 1", name="ck_offline_quote_revision"),
+        CheckConstraint(
+            "status IN ('draft', 'published', 'withdrawn')", name="ck_offline_quote_status"
+        ),
+        Index("ix_offline_quotes_product_time", "product_id", "condition", "observed_at"),
+        Index("ix_offline_quotes_shop_time", "shop_id", "product_id", "observed_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    shop_id: Mapped[str] = mapped_column(ForeignKey("offline_shops.id"))
+    product_snapshot: Mapped[dict] = mapped_column(JSON)
+    variant_digest: Mapped[str] = mapped_column(String(64))
+    item_paise: Mapped[int] = mapped_column(Integer)
+    condition: Mapped[str] = mapped_column(String(20))
+    in_stock: Mapped[bool] = mapped_column(Boolean)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    evidence_reference: Mapped[str] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OfflineQuoteEvent(Base):
+    __tablename__ = "offline_quote_events"
+    __table_args__ = (UniqueConstraint("quote_id", "revision"),)
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    quote_id: Mapped[str] = mapped_column(ForeignKey("offline_quotes.id"))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20))
+    note: Mapped[str] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Product(Base):
     __tablename__ = "products"
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
