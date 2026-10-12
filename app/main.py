@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app import __version__
 from app.analysis import router as analysis_router
 from app.auth import require_admin
 from app.catalog import router
@@ -32,7 +33,7 @@ from app.reports import router as reports_router
 from app.schemas import IngestBatch
 
 settings = get_settings()
-app = FastAPI(title="PriceLedger API", version="0.1.0")
+app = FastAPI(title="PriceLedger API", version=__version__)
 app.add_middleware(RequestSafetyMiddleware)
 app.add_middleware(
     CORSMiddleware,

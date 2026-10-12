@@ -1,0 +1,73 @@
+name: priceledger
+
+x-api: &api
+  image: priceledger-api:1.0.0
+  build: .
+  environment:
+    PRICELEDGER_DATABASE_URL: postgresql+psycopg://priceledger:${POSTGRES_PASSWORD:?Set a generated hexadecimal POSTGRES_PASSWORD}@db:5432/priceledger
+    PRICELEDGER_ADMIN_TOKEN: ${PRICELEDGER_ADMIN_TOKEN:-}
+    PRICELEDGER_CORS_ORIGINS: '["http://localhost:8080","http://127.0.0.1:8080"]'
+    PRICELEDGER_DEMO_MODE: "false"
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  pids_limit: 128
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: priceledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a generated hexadecimal POSTGRES_PASSWORD}
+      POSTGRES_DB: priceledger
+    volumes: [database:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U priceledger -d priceledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *api
+    command: [alembic, upgrade, head]
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    <<: *api
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  worker:
+    <<: *api
+    command: [python, -m, app.worker, --interval-minutes, "15", --max-jobs, "10"]
+    healthcheck:
+      disable: true
+    depends_on:
+      api:
+        condition: service_healthy
+    stop_grace_period: 45s
+    restart: unless-stopped
+  web:
+    profiles: [web]
+    image: priceledger-web:1.0.0
+    build: ../priceledger-web
+    ports: ["127.0.0.1:${WEB_PORT:-8080}:8080"]
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    restart: unless-stopped
+
+volumes:
+  database:

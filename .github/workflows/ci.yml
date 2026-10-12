@@ -6,6 +6,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  UV_PYTHON: "3.12"
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,11 +18,13 @@ jobs:
           version: "0.12.6"
           enable-cache: true
       - run: uv sync --locked
-      - run: uv run ruff check app tests
-      - run: uv run ruff format --check app tests
+      - run: uv run ruff check app tests scripts
+      - run: uv run ruff format --check app tests scripts
       - run: uv run alembic upgrade head
       - run: uv run alembic check
       - run: uv run pytest -q
+      - name: Audit installed locked dependencies
+        run: uv tool run --from pip-audit==2.10.1 pip-audit --path "$(uv run python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
   postgres:
     runs-on: ubuntu-latest
     services:
@@ -49,3 +53,28 @@ jobs:
       - run: uv run alembic upgrade head
       - run: uv run alembic check
       - run: uv run pytest -q tests/test_postgres.py tests/test_report_concurrency.py tests/test_offline_concurrency.py
+  containers:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: 0123456789abcdef0123456789abcdef
+      API_PORT: "18000"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose and start the migrated release
+        run: |
+          docker compose config --quiet
+          docker compose up --build -d --wait --wait-timeout 180 api worker
+      - run: python scripts/release_smoke.py http://127.0.0.1:18000
+      - name: Check schema drift in the runtime image
+        run: docker compose exec -T api alembic check
+      - name: Exercise PostgreSQL backup and restore in the disposable database
+        run: |
+          docker compose exec -T db pg_dump -U priceledger -Fc priceledger > release-backup.dump
+          docker compose exec -T db createdb -U priceledger priceledger_restore
+          docker compose exec -T db pg_restore -U priceledger --exit-on-error -d priceledger_restore < release-backup.dump
+          docker compose exec -T -e PRICELEDGER_DATABASE_URL=postgresql+psycopg://priceledger:${POSTGRES_PASSWORD}@db:5432/priceledger_restore api alembic check
+          docker compose exec -T db psql -U priceledger -d priceledger_restore -Atc "SELECT version_num FROM alembic_version" | grep -Fx 9c0ff0799756
+          test "$(docker compose exec -T db psql -U priceledger -d priceledger_restore -Atc 'SELECT count(*) FROM products')" = "0"
+      - name: Keep disposable database cleanup confined to this runner
+        if: always()
+        run: docker compose down --volumes

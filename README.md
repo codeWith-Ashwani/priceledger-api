@@ -4,6 +4,8 @@ Backend for comparing real product prices in India and maintaining a dated, sour
 
 **Stack:** Python 3.12+, FastAPI, SQLAlchemy, Alembic and PostgreSQL. SQLite supports local development. The [React frontend](https://github.com/codeWith-Ashwani/priceledger-web) lives in a separate private repository.
 
+**Release 1.0.0:** feature scope is frozen. This release consolidates the existing lookup, matching, comparison, recorded history, targets, owner tools, issue review and documented local-shop evidence. Both repositories remain private. Coverage depends on readable, permitted sources; a release version does not imply universal store coverage or complete launch history.
+
 ## Quick start
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/getting-started/installation/). From this repository:
@@ -197,13 +199,60 @@ The newest previously published observation per shop controls its current eligib
 - Responses carry request IDs, `no-store` and `nosniff`. Application logs omit product URLs, payloads, tokens and client addresses. `--no-access-log` avoids separate raw-URL Uvicorn logging; configure proxy logs consistently.
 - PostgreSQL uses bounded connection pools and query/lock/idle-transaction timeouts. SQLite enables foreign keys and busy timeouts. Readiness checks database availability and migration heads.
 
-Deployment still needs HTTPS, measured load capacity, egress controls, monitoring and tested backups. Verify source access/display/retention permissions before public operation.
+Public operation needs environment-specific HTTPS, measured load capacity, egress controls, monitoring and real-data restore drills. Verify source access/display/retention permissions before public operation.
+
+## Reproducible release setup
+
+Install Docker with Compose v2. Keep the two repositories as sibling directories named `priceledger-api` and `priceledger-web`, and check out `v1.0.0` in each. From this API directory, generate a local credentials file once; the command refuses to overwrite an existing file:
+
+```sh
+uv run python -c "import secrets; f=open('.env.compose','x'); f.write('POSTGRES_PASSWORD='+secrets.token_hex(32)+'\nPRICELEDGER_ADMIN_TOKEN='+secrets.token_hex(32)+'\n'); f.close()"
+docker compose --env-file .env.compose --profile web up --build -d --wait
+uv run python scripts/release_smoke.py
+```
+
+Open `http://127.0.0.1:8080`. This serves compiled React assets through Nginx, proxies `/api/v1` to the API, and runs PostgreSQL 17 plus one collector. The migration job must finish before API startup; API readiness gates the web and worker. Empty catalogs remain empty until a real lookup. Read the generated admin token locally when using the owner workspace; never paste it into browser configuration, command-line arguments or Git. Omitting the token disables owner operations.
+
+API and web ports bind to loopback; PostgreSQL has no published port. Application containers run as non-root with read-only filesystems, temporary scratch space and dropped capabilities. Docker contexts exclude credentials, databases, dependencies and QA artifacts. The API health check verifies database connectivity and the migration head; worker startup alone does not prove successful collections. Source budgets and freshness settings retain their normal defaults.
+
+If ports 8000/8080 are occupied, add `API_PORT=8001` and/or `WEB_PORT=8081` to `.env.compose`; pass the corresponding API origin to `release_smoke.py`. The web uses its same-origin proxy, so its build needs no local port change.
+
+```sh
+docker compose --env-file .env.compose ps
+docker compose --env-file .env.compose stop
+docker compose --env-file .env.compose --profile web up -d --wait
+```
+
+The named database volume survives stopping/recreating containers. Do not use `down --volumes` on retained data. The packaged proxy intentionally does not trust browser-supplied forwarded addresses; browser traffic shares its connection-address quota bucket. Before a public multi-user rollout, configure an explicitly trusted edge and appropriate rate limiting, TLS and monitoring for that environment. Never enable wildcard forwarded-header trust. Access logs are disabled to avoid storing product queries and credentials; the API emits request IDs and bounded route/status/timing logs.
+
+### Backup, restore and upgrades
+
+Use PostgreSQL's consistent custom-format dump; these Compose commands work without binary shell redirection, including in Windows PowerShell. Create a private `../backups` directory first:
+
+```sh
+docker compose --env-file .env.compose exec -T db pg_dump -U priceledger -Fc -f /tmp/priceledger-backup.dump priceledger
+docker compose --env-file .env.compose cp db:/tmp/priceledger-backup.dump ../backups/priceledger-backup.dump
+```
+
+Give each retained backup a unique dated filename. Store encrypted copies outside the host and restrict access: the database includes private source references and review notes. Container `/tmp` is temporary and is not a backup destination.
+
+Restore into a new database first, leaving the current database intact:
+
+```sh
+docker compose --env-file .env.compose exec -T db createdb -U priceledger priceledger_restore
+docker compose --env-file .env.compose cp ../backups/priceledger-backup.dump db:/tmp/priceledger-restore.dump
+docker compose --env-file .env.compose exec -T db pg_restore -U priceledger --exit-on-error -d priceledger_restore /tmp/priceledger-restore.dump
+```
+
+Verify the restored migration revision, product/observation counts, permissions, private audit records and a selection of genuine histories in an isolated API deployment before switching the database connection. CI exercises fresh-schema dump/restore and migration consistency; it cannot establish recoverability of your actual retained evidence. Protect and back up `.env.compose` separately.
+
+For upgrades, back up first, stop web/API/worker, check out the selected matching tags, then rebuild with `docker compose --env-file .env.compose --profile web up --build --force-recreate -d --wait`. Recreating web refreshes its upstream connection. Check readiness, run the release smoke and inspect collection health. If rollback is required after a schema-changing upgrade, restore the pre-upgrade backup to a separate database and run the matching application tag; do not blindly downgrade a populated database. Release 1.0.0 keeps migration head `9c0ff0799756` unchanged from the previous phase.
 
 ## Development and verification
 
 ```sh
-uv run ruff check app tests
-uv run ruff format --check app tests
+uv run ruff check app tests scripts
+uv run ruff format --check app tests scripts
 uv run pytest -q
 uv run alembic check
 ```
