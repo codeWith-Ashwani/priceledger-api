@@ -18,6 +18,7 @@ from app.ingestion import ingest
 from app.limits import lookup_limit
 from app.models import Offer, Product, Retailer, Source
 from app.retail import (
+    SHOPIFY_ORIGINS,
     STORES,
     Listing,
     LookupError,
@@ -231,7 +232,15 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
                 "Paste a full product URL or enter a brand, model and variant (up to 128 characters).",
                 400,
             )
-        custom = registered_stores(db)
+        brand = next(
+            (
+                brand
+                for _, brand in SHOPIFY_ORIGINS.values()
+                if re.match(re.escape(brand) + r"\s+", query, re.I)
+            ),
+            None,
+        )
+        custom = registered_stores(db, brand)
         permitted, limited = reserve_stores(
             db, [*discovery_retailers(), *custom], cost=1, custom=custom
         )

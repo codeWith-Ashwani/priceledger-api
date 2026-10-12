@@ -23,6 +23,7 @@ from app.http_safety import RequestSafetyMiddleware
 from app.ingestion import IngestionError, ingest
 from app.insights import router as insights_router
 from app.lookup import router as lookup_router
+from app.operations import router as operations_router
 from app.schemas import IngestBatch
 
 settings = get_settings()
@@ -42,6 +43,7 @@ app.include_router(lookup_router)
 app.include_router(comparison_router)
 app.include_router(imports_router)
 app.include_router(discovery_router)
+app.include_router(operations_router)
 
 
 @app.exception_handler(RequestValidationError)

@@ -28,7 +28,9 @@ A fresh installation starts with an empty catalog in `priceledger.db`; there is 
 
 `POST /api/v1/products/{id}/compare` checks other connected stores. The frontend calls it automatically. Same-model offers may differ in colour, storage, RAM or size and retain labelled differences. Only verified exact identities share history. Generations, accessories, protection bundles and incompatible conditions remain distinct.
 
-Dedicated adapters cover Amazon India, Flipkart, Meesho, Croma, Reliance Digital and brand-gated iQOO, Sony Center and boAt. Generic readable public pages can expose an unambiguous INR Product/Offer. Verified Shopify submissions can teach new stores and observed brands; brand-scoped iPlanet/Imagine origins support Apple discovery. Adapter endpoints and security allowlists are explicit integration metadata. Product IDs, prices, ratings and stock come from source evidence.
+Dedicated adapters cover Amazon India, Flipkart, Meesho, Croma, Reliance Digital and brand-gated iQOO, Sony Center and boAt. Generic readable public pages can expose an unambiguous INR Product/Offer. Verified Shopify submissions can teach new stores and observed brands; brand-scoped iPlanet/Imagine origins support Apple discovery, and Noise's official public catalog supports Noise discovery. Known brand/model searches include these origins without prior product registration. Adapter endpoints and security allowlists are explicit integration metadata. Product IDs, prices, ratings and stock come from source evidence.
+
+Shopify ProductGroup pages require agreement between the selected variant's schema SKU/INR price and native product metadata. An unselected group can identify a model only when its product ID, vendor and page path agree; it supplies no variant price. Unpriced anchors can search their own store for verified variants. Candidate ordering preserves model qualifiers, including Elite, Neo, SE and Plus/+, and prefers variants of the submitted page when other evidence ties. Search metadata is bounded and ranked before truncation; Apple reseller exclusion queries are not applied to Noise's different search behavior. Ratings may inherit a group's explicitly published rating, while shipping and condition remain unknown unless evidenced.
 
 All returned verified offers participate in comparison; there is no three/four-card cap or 100-candidate catalog cutoff. Discovery is bounded by candidate verification, source budgets and supported adapters. Missing cards can mean blocked access, cooldown, unreadable markup or unverified identity, rather than absent stock. Readable current pages do not provide complete historical archives.
 
@@ -135,6 +137,11 @@ Set a server-only `PRICELEDGER_ADMIN_TOKEN`. Administrative requests require `X-
 | `GET /admin/imports` | Recent draft/commit audit records |
 | `GET /admin/discovery-stores` | Learned stores/source status |
 | `POST /admin/discovery-stores/{id}/status` | Pause/resume searches without deleting evidence |
+| `GET /admin/collection/overview` | Recorded collection counters and completed checks in the last 24 hours |
+| `GET /admin/collection/offers?status=all&limit=25&offset=0` | Paginated tracked-offer health and scheduling constraints |
+| `GET /admin/collection/sources?limit=25&offset=0` | Paginated source access, cooldowns, daily budgets and check outcomes |
+
+Collection health is read-only: it neither contacts retailers nor starts jobs. Offer filters include `stale`, `failed`, `gap`, `due`, `paused`, `unscheduled` and `inactive`; pages accept 1–100 records. Missing/future-dated or older-than-`FRESHNESS_HOURS` quotes count as stale. A gap means no approved, past listing-price observation within `HISTORY_GAP_HOURS`; an unpriced identity check cannot close it. Due counts follow worker scheduling, source permissions, UTC daily budgets and cooldowns; leased jobs do not prove a worker process is alive. Source diagnostics include search failures even when no offer was created. Indexed latest-record queries and SQL aggregates avoid loading observation history or issuing one query per displayed offer.
 
 Imports accept UTF-8 CSV or JSON arrays, at most 1 MB and 1,000 records. Each row identifies an existing exact offer, retailer listing, typed variant attributes, seller/condition/region, unique source event, aware past timestamp, stock and evidence reference. Prices are integer paise; only INR listing prices are accepted. Unknown shipping remains empty/null. Download an identity template with blank evidence fields from the owner UI.
 
@@ -171,6 +178,7 @@ Frontend browser checks combine intercepted contracts with genuine previously lo
 | `insights`, `analysis` | Recorded statistics and deal assessment |
 | `collection`, `coordination`, `worker` | Durable budgets, leases and refresh jobs |
 | `ingestion`, `history_imports` | Validated observations and reviewed archives |
+| `operations` | Authenticated read-only collection health and paginated diagnostics |
 | `http_safety`, `limits`, `auth` | Request safeguards and administrative access |
 
 Both repositories remain private. README is the only repository documentation; research, sprint notes and QA artifacts remain local. Databases, credentials, environments and generated output are ignored by Git.

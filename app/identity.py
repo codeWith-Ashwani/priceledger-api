@@ -98,27 +98,32 @@ def model_attributes(title: str, brand: str, attributes: dict) -> dict:
         result["model"] = re.split(r"[,|]", supplied, maxsplit=1)[0].strip()
     prefix = re.split(r"[,|()]", base, maxsplit=1)[0].strip()
     code = re.match(
-        r"((?:[A-Za-z][A-Za-z -]{0,35}\s+)?[A-Za-z]{1,24}(?:-[A-Za-z]{1,8})?[- ]?\d{1,5}[A-Za-z]?(?:[-/]\d{1,4})?(?:\s+(?:Pro|Plus|Lite|Ultra|Max|ANC|[2345]G|v\d+|Gen(?:eration)?[- ]?\d+|Mark[- ]?\d+))?)\b",
+        r"((?:[A-Za-z][A-Za-z -]{0,35}\s+)?[A-Za-z]{1,24}(?:-[A-Za-z]{1,8})?[- ]?\d{1,5}[A-Za-z]?(?:[-/]\d{1,4})?(?:\s+(?:Pro|Plus|Lite|Ultra|Max|Elite|Neo|SE|ANC|[2345]G|v\d+|Gen(?:eration)?[- ]?\d+|Mark[- ]?\d+))?)\b",
         prefix,
+        re.I,
     )
     if code and not re.search(r"\b(?:size|pack|of|hours?|mah|watts?)\s*\d", code[1], re.I):
         derived = code[1].strip()
+        if prefix[code.end() :].startswith("+"):
+            derived += " Plus"
         unqualified = re.sub(
-            r"\s+(?:Pro|Plus|Lite|Ultra|Max|ANC|[2345]G|v\d+|Gen(?:eration)?[- ]?\d+|Mark[- ]?\d+)$",
+            r"\s+(?:Pro|Plus|Lite|Ultra|Max|Elite|Neo|SE|ANC|[2345]G|v\d+|Gen(?:eration)?[- ]?\d+|Mark[- ]?\d+)$",
             "",
             derived,
             flags=re.I,
         )
         # Older parsers omitted generation qualifiers. Restore them in matching
         # metadata without rewriting historical observation snapshots.
-        if not supplied or normalized(result["model"]) == normalized(unqualified):
+        if not supplied or normalized(str(result["model"]).replace("+", " Plus")) == normalized(
+            unqualified
+        ):
             result["model"] = derived
     return result
 
 
 def model_key(value) -> str:
     # Charging wattage is a retailer naming addition, not a model generation.
-    return normalized(re.sub(r"\b\d{1,3}W\b", "", str(value), flags=re.I))
+    return normalized(re.sub(r"\b\d{1,3}W\b", "", str(value).replace("+", " Plus"), flags=re.I))
 
 
 def match_model(left, right) -> dict:
@@ -178,13 +183,18 @@ def match_variant(left, right) -> dict:
     brand_a, brand_b = normalized(left.brand), normalized(right.brand)
     conflicts = []
     for key in ("model", "color", "size", "ram_gb", "storage_gb", "pack", "mpn"):
-        if key in a and key in b and normalized(a[key]) != normalized(b[key]):
+        left_value = str(a.get(key, ""))
+        right_value = str(b.get(key, ""))
+        if key == "model":
+            left_value, right_value = (
+                left_value.replace("+", " Plus"),
+                right_value.replace("+", " Plus"),
+            )
+        if key in a and key in b and normalized(left_value) != normalized(right_value):
             conflicts.append(key)
     if brand_a != brand_b or brand_a == "brandnotstated":
         return {"status": "review", "reason": "Brand identity is not confirmed."}
-    if conflicts == ["model"] and normalized(
-        re.sub(r"\b\d{1,3}W\b", "", str(a["model"]), flags=re.I)
-    ) == normalized(re.sub(r"\b\d{1,3}W\b", "", str(b["model"]), flags=re.I)):
+    if conflicts == ["model"] and model_key(a["model"]) == model_key(b["model"]):
         return {
             "status": "review",
             "reason": "Retailer model names differ in their charging label; a shared manufacturer identifier is needed.",

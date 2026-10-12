@@ -112,7 +112,7 @@ def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
             or brand.lower() != store_brand.lower()
         ):
             continue
-        base = f"https://{'www.' if host == 'imagineonline.store' else ''}{host}/search?"
+        base = f"https://{'www.' if host in {'imagineonline.store', 'gonoise.com'} else ''}{host}/search?"
         target = target_for(base)
         if target.retailer in result or db.get(DiscoveryStore, target.retailer) is not None:
             continue

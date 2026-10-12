@@ -614,3 +614,14 @@ def test_postgres_streamed_catalog_matching_preserves_every_batch():
         statistics = insights(anchor_id, days=90, basis="item", db=db)
         assert statistics["observations"] == 106
         assert statistics["low"]["price_paise"] == 100000
+        from app.operations import offers as collection_offers
+        from app.operations import overview as collection_overview
+        from app.operations import sources as collection_sources
+
+        health = collection_overview(db)
+        assert health["summary"]["tracked"] >= 107
+        page = collection_offers(status="all", limit=25, offset=25, db=db)
+        assert len(page["items"]) == 25 and page["total"] >= 107
+        assert all(type(row["due"]) is bool for row in page["items"])
+        sources = collection_sources(limit=25, offset=25, db=db)
+        assert len(sources["items"]) == 25 and sources["total"] >= 107

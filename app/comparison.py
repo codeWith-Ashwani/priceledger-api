@@ -1,6 +1,7 @@
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -32,7 +33,7 @@ from app.retail import (
 )
 
 router = APIRouter(prefix="/api/v1")
-DISCOVERY_VERSION = 12
+DISCOVERY_VERSION = 14
 
 
 def link_catalog_matches(db: Session, product_id: str, anchor: Listing):
@@ -99,7 +100,7 @@ def listing_from_record(product: Product, offer: Offer) -> Listing:
     )
 
 
-def candidate_priority(item: dict, expected: dict) -> tuple[int, int, int]:
+def candidate_priority(item: dict, expected: dict) -> tuple[int, int, int, int]:
     actual = model_attributes(item["title"], str(expected.get("_brand", "")), {})
     actual.update(
         {key: value for key, value in item.get("variant_attributes", {}).items() if key != "model"}
@@ -129,7 +130,14 @@ def candidate_priority(item: dict, expected: dict) -> tuple[int, int, int]:
             re.I,
         )
     )
-    return int(incompatible), conflicts, -agreements
+    requested_url = urlsplit(str(expected.get("_url", "")))
+    candidate_url = urlsplit(str(item.get("url", "")))
+    same_page = bool(
+        requested_url.hostname
+        and requested_url.hostname == candidate_url.hostname
+        and requested_url.path.rstrip("/") == candidate_url.path.rstrip("/")
+    )
+    return int(incompatible), conflicts, -agreements, int(not same_page)
 
 
 def discovery_query(anchor: Listing) -> str:
@@ -242,7 +250,11 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
     anchor = listing_from_record(product, offer)
     existing = db.get(ComparisonScan, product_id)
     anchor_retailers = set(
-        db.scalars(select(Offer.retailer_id).where(Offer.product_id == product_id))
+        db.scalars(
+            select(Offer.retailer_id).where(
+                Offer.product_id == product_id, Offer.current_item_paise.is_not(None)
+            )
+        )
     )
     custom = registered_stores(db, product.brand)
     selected = [
@@ -296,12 +308,14 @@ def scan_comparison(db: Session, product_id: str, *, lease_token: str | None = N
                     discover_store(
                         retailer,
                         query,
-                        {**anchor.attributes, "_brand": anchor.brand},
+                        {**anchor.attributes, "_brand": anchor.brand, "_url": anchor.target.url},
                         custom=custom[retailer],
                     )
                     if retailer in custom
                     else discover_store(
-                        retailer, query, {**anchor.attributes, "_brand": anchor.brand}
+                        retailer,
+                        query,
+                        {**anchor.attributes, "_brand": anchor.brand, "_url": anchor.target.url},
                     )
                 ),
                 permitted,

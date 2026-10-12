@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from bs4 import BeautifulSoup
 
 from app.config import get_settings
-from app.identity import mobile_attributes, model_attributes
+from app.identity import mobile_attributes, model_attributes, model_key
 from app.public_http import PublicFetchError, fetch_public
 
 STORES = {
@@ -52,6 +52,7 @@ SHORT_HOSTS = {"amzn.in", "amzn.to", "fkrt.it", "dl.flipkart.com"}
 SHOPIFY_ORIGINS = {
     "iplanet.one": ("iPlanet", "Apple"),
     "imagineonline.store": ("Imagine", "Apple"),
+    "gonoise.com": ("Noise Official Store", "Noise"),
 }
 IMAGE_HOSTS = {
     "m.media-amazon.com",
@@ -595,12 +596,43 @@ def parse_listing(html: str, target: Target) -> Listing:
             if isinstance(v, dict) and str(v.get("id")) == selected
         ]
         group_products = []
+        identity_groups = []
         for group in groups:
             group_url = urlsplit(urljoin(target.url, str(group.get("url", ""))))
             if group_url.hostname != urlsplit(target.url).hostname or group_url.path.rstrip(
                 "/"
             ) != urlsplit(target.url).path.rstrip("/"):
                 continue
+            group_brand = group.get("brand", {})
+            group_brand = (
+                group_brand.get("name", "") if isinstance(group_brand, dict) else group_brand
+            )
+            if (
+                group.get("name")
+                and group.get("productGroupID") is not None
+                and data.get("id") is not None
+                and str(group["productGroupID"]) == str(data["id"])
+                and str(group_brand).casefold() == str(data.get("vendor", "")).casefold()
+                and group_brand
+            ):
+                identity_groups.append(
+                    {
+                        **{
+                            key: group[key]
+                            for key in (
+                                "name",
+                                "brand",
+                                "category",
+                                "model",
+                                "image",
+                                "aggregateRating",
+                            )
+                            if key in group
+                        },
+                        "@type": "Product",
+                        "offers": {},
+                    }
+                )
             children = group.get("hasVariant", [])
             for child in (children if isinstance(children, list) else [children])[:500]:
                 if not isinstance(child, dict) or child.get("@type") != "Product":
@@ -632,13 +664,17 @@ def parse_listing(html: str, target: Target) -> Listing:
                     )
                 inherited = {
                     key: group[key]
-                    for key in ("brand", "category", "model", "itemCondition")
+                    for key in ("brand", "category", "model", "itemCondition", "aggregateRating")
                     if key in group
                 }
                 group_products.append({**inherited, **child, "offers": offer})
                 target = target_for(url)
         if group_products:
             products = group_products
+        elif not selected and len(identity_groups) == 1:
+            # An unselected group identifies the model, not a priced variant.
+            # Discovery can subsequently verify individual variant URLs.
+            products = identity_groups
     if (
         target.retailer == "flipkart"
         and target.external_id
@@ -937,7 +973,12 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
             }
     origin = SHOPIFY_ORIGINS.get(urlsplit(base).hostname.removeprefix("www."))
     search_query = query
-    if custom and origin and re.match(re.escape(origin[1]) + r"\s+", query, re.I):
+    if (
+        custom
+        and origin
+        and origin[1] == "Apple"
+        and re.match(re.escape(origin[1]) + r"\s+", query, re.I)
+    ):
         model = re.sub(r"^" + re.escape(origin[1]) + r"\s+", "", query, flags=re.I)
         if re.fullmatch(r"[a-zA-Z0-9 -]{1,100}", model):
             # Shopify's default broad search includes accessories and other models.
@@ -948,6 +989,9 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
                     "max",
                     "plus",
                     "ultra",
+                    "elite",
+                    "neo",
+                    "lite",
                     "case",
                     "cover",
                     "protector",
@@ -1021,8 +1065,6 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
                             "retailer": retailer,
                             "retailer_name": name,
                         }
-                    if len(items) >= 6:
-                        break
         for anchor in soup.select("a[href]"):
             try:
                 target = target_for(urljoin(search_url, anchor["href"]))
@@ -1055,6 +1097,24 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
                 }
             if len(items) >= 12:
                 break
+        candidates = list(items.values())
+        if custom and origin:
+            expected_model = model_attributes(query, origin[1], {}).get("model")
+            if expected_model:
+
+                def model_priority(item):
+                    actual = model_attributes(item["title"], origin[1], {}).get("model")
+                    return (
+                        0
+                        if actual and model_key(actual) == model_key(expected_model)
+                        else 1
+                        if not actual
+                        else 2
+                    )
+
+                # Inspect a bounded metadata page before truncating results. Some
+                # themes ignore exclusion syntax and list related models first.
+                candidates.sort(key=model_priority)
         return {
             "retailer": retailer,
             "retailer_name": name,
@@ -1063,7 +1123,7 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
             if items
             else "No readable matches. Paste a product link instead.",
             "search_url": search_url,
-            "items": list(items.values()),
+            "items": candidates[:12],
         }
     except LookupError as exc:
         return {
