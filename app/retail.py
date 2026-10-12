@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from bs4 import BeautifulSoup
 
 from app.config import get_settings
-from app.identity import mobile_attributes, model_attributes, model_key
+from app.identity import fireboltt_model, mobile_attributes, model_attributes, model_key
 from app.public_http import PublicFetchError, fetch_public
 
 STORES = {
@@ -53,6 +53,7 @@ SHOPIFY_ORIGINS = {
     "iplanet.one": ("iPlanet", "Apple"),
     "imagineonline.store": ("Imagine", "Apple"),
     "gonoise.com": ("Noise Official Store", "Noise"),
+    "fireboltt.com": ("Fire-Boltt Official Store", "Fire-Boltt"),
 }
 IMAGE_HOSTS = {
     "m.media-amazon.com",
@@ -559,6 +560,10 @@ def parse_listing(html: str, target: Target) -> Listing:
         raise LookupError(
             "retailer_blocked", "The retailer requested a CAPTCHA. No price was recorded."
         )
+    if urlsplit(target.url).hostname in {"fireboltt.com", "www.fireboltt.com"}:
+        from app.fireboltt import parse
+
+        return parse(soup, target)
     products = []
     groups = []
     for script in soup.select('script[type="application/ld+json"]'):
@@ -973,6 +978,9 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
             }
     origin = SHOPIFY_ORIGINS.get(urlsplit(base).hostname.removeprefix("www."))
     search_query = query
+    fireboltt = bool(custom and origin and origin[1] == "Fire-Boltt")
+    if fireboltt:
+        search_query = re.sub(r"^fire[- ]?boltt\s+", "", query, flags=re.I)
     if (
         custom
         and origin
@@ -1014,7 +1022,7 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
             normalized = re.sub(r"(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)", " ", value.lower())
             return set(re.findall(r"[a-z0-9]+", normalized))
 
-        terms = tokens(query)
+        terms = tokens(search_query if fireboltt else query)
         items = {}
         if retailer in {"sony", "boat"} or custom:
             # Shopify can render search cards through JavaScript. Read only its
@@ -1050,6 +1058,13 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
                             )
                             or not variant_id.isdigit()
                         ):
+                            continue
+                        if fireboltt and str(product.get("vendor", "")).lower() not in {
+                            "boltt games",
+                            "fire-boltt",
+                            "fireboltt",
+                            "fire boltt",
+                        }:
                             continue
                         target = target_for(
                             urljoin(search_url, "/products/" + handle)
@@ -1100,10 +1115,14 @@ def search_store(retailer: str, query: str, *, custom: dict | None = None) -> di
         candidates = list(items.values())
         if custom and origin:
             expected_model = model_attributes(query, origin[1], {}).get("model")
+            if fireboltt:
+                expected_model = fireboltt_model(search_query)
             if expected_model:
 
                 def model_priority(item):
                     actual = model_attributes(item["title"], origin[1], {}).get("model")
+                    if fireboltt:
+                        actual = fireboltt_model(item["title"])
                     return (
                         0
                         if actual and model_key(actual) == model_key(expected_model)

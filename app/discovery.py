@@ -11,6 +11,7 @@ from app.auth import require_admin
 from app.collection import insert_missing
 from app.config import get_settings
 from app.db import get_db, now, utc
+from app.identity import normalized
 from app.models import DiscoveryStore, Source
 from app.retail import (
     SHOPIFY_ORIGINS,
@@ -91,7 +92,7 @@ def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
     )
     result = {}
     for store in rows:
-        if brand and brand.lower() not in {value.lower() for value in store.brands}:
+        if brand and normalized(brand) not in {normalized(value) for value in store.brands}:
             continue
         base = f"https://{store.host}/search?"
         # Revalidate persisted configuration before it can become a request.
@@ -109,10 +110,10 @@ def registered_stores(db: Session, brand: str | None = None) -> dict[str, dict]:
         if (
             (limit > 0 and len(result) >= limit)
             or not brand
-            or brand.lower() != store_brand.lower()
+            or normalized(brand) != normalized(store_brand)
         ):
             continue
-        base = f"https://{'www.' if host in {'imagineonline.store', 'gonoise.com'} else ''}{host}/search?"
+        base = f"https://{'www.' if host in {'imagineonline.store', 'gonoise.com', 'fireboltt.com'} else ''}{host}/search?"
         target = target_for(base)
         if target.retailer in result or db.get(DiscoveryStore, target.retailer) is not None:
             continue

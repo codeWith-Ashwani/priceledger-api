@@ -33,7 +33,7 @@ from app.retail import (
 )
 
 router = APIRouter(prefix="/api/v1")
-DISCOVERY_VERSION = 14
+DISCOVERY_VERSION = 15
 
 
 def link_catalog_matches(db: Session, product_id: str, anchor: Listing):

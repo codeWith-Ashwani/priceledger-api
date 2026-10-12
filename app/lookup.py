@@ -236,7 +236,11 @@ def lookup(body: LookupInput, db: Session = Depends(get_db)):
             (
                 brand
                 for _, brand in SHOPIFY_ORIGINS.values()
-                if re.match(re.escape(brand) + r"\s+", query, re.I)
+                if re.match(
+                    (r"fire[- ]?boltt" if brand == "Fire-Boltt" else re.escape(brand)) + r"\s+",
+                    query,
+                    re.I,
+                )
             ),
             None,
         )

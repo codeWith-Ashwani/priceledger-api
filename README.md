@@ -34,6 +34,8 @@ Shopify ProductGroup pages require agreement between the selected variant's sche
 
 All returned verified offers participate in comparison; there is no three/four-card cap or 100-candidate catalog cutoff. Discovery is bounded by candidate verification, source budgets and supported adapters. Missing cards can mean blocked access, cooldown, unreadable markup or unverified identity, rather than absent stock. Readable current pages do not provide complete historical archives.
 
+Fire-Boltt's official `.com` store supports URL lookup and brand/model discovery, including the spellings Fire-Boltt, Fireboltt and Fire Boltt. Its theme uses Boltt Games as vendor and can append an invalid `itemReviewed` property to otherwise valid Product JSON. The scoped adapter accepts only that known suffix and requires canonical path, visible title, native product ID/vendor, selected variant, SKU, INR price and stock to agree. It reads literal JSON without executing scripts or making additional requests. Search prices remain untrusted; sold-out listings remain visible but cannot win current ranking. Word-only watch models preserve Pro/Plus/Max and other qualifiers. Shopify variant IDs are not treated as manufacturer part numbers. Shipping, condition and ratings stay unknown unless evidenced. No `.shop` mirror or unrelated host inherits this adapter or brand identity.
+
 Candidate URLs must belong to the searched retailer before a listing is fetched. Duplicate canonical URLs are checked once per store scan. Rejected URLs remain diagnostics; failed page checks retain their validated target for audit recording. One rejected candidate cannot abort the other store results.
 
 ## Prices and history

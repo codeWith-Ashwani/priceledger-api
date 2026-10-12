@@ -14,6 +14,19 @@ def normalized(value) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
+def fireboltt_model(title: str) -> str | None:
+    """Word-only watch model names retain generations and stop before variant/marketing text."""
+    title = re.sub(r"^fire[-\u2010-\u2015 ]?boltt\s+", "", title, flags=re.I)
+    value = re.split(
+        r"\s+[-\u2010-\u2015]\s+|[,|()]|\b\d+(?:\.\d+)?\s*(?:mm|cm|inch|[\"'″])|"
+        r"\b(?:smart\s*watch|bluetooth|BT\s+calling|with)\b",
+        title,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip()
+    return value if re.fullmatch(r"[A-Za-z][A-Za-z0-9 +.-]{0,79}", value) else None
+
+
 def mobile_attributes(title: str, brand: str, attributes: dict) -> dict:
     result = dict(attributes)
     ram = re.search(r"(\d+)\s*GB\s*RAM", title, re.I)
@@ -94,6 +107,19 @@ def model_attributes(title: str, brand: str, attributes: dict) -> dict:
     base = re.sub(r"^" + re.escape(brand) + r"\s*", "", title, flags=re.I)
     # Schema model fields can contain the entire marketing title (Reliance).
     supplied = str(result.get("model", ""))
+    if normalized(brand) == "fireboltt" and re.search(r"\bsmart\s*watch\b", title, re.I):
+        # This brand publishes word-only model names; preserve every qualifier.
+        named = fireboltt_model(title)
+        if named and (
+            not supplied
+            or re.fullmatch(
+                re.escape(supplied) + r"(?:\s+(?:Pro|Plus|Lite|Ultra|Max|Elite|Neo|SE)|\+)+",
+                named,
+                re.I,
+            )
+        ):
+            supplied = named
+            result["model"] = supplied
     if supplied:
         result["model"] = re.split(r"[,|]", supplied, maxsplit=1)[0].strip()
     prefix = re.split(r"[,|()]", base, maxsplit=1)[0].strip()
