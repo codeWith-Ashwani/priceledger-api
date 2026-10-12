@@ -1,6 +1,6 @@
 """Read-only owner visibility into collection health; never starts retailer requests."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.config import get_settings
-from app.db import get_db, now
+from app.db import get_db, now, utc
 from app.evidence import approved_sources
 from app.models import (
     CollectionAttempt,
@@ -24,6 +24,10 @@ from app.models import (
 
 router = APIRouter(prefix="/api/v1/admin/collection", dependencies=[Depends(require_admin)])
 Status = Literal["all", "stale", "failed", "gap", "due", "paused", "unscheduled", "inactive"]
+
+
+def utc_values(row):
+    return {key: utc(value) if isinstance(value, datetime) else value for key, value in row.items()}
 
 
 def source_active(at):
@@ -188,7 +192,7 @@ def overview(db: Session = Depends(get_db)):
     return {
         "checked_at": at,
         "summary": summary,
-        "checks_24h": dict(checks),
+        "checks_24h": utc_values(checks),
         "freshness_hours": get_settings().freshness_hours,
         "gap_hours": get_settings().history_gap_hours,
         "note": "Counts describe recorded checks and scheduling, not whether a worker process is running. Gaps mean no approved listing-price observation within the configured interval. Stale includes missing prices.",
@@ -213,7 +217,7 @@ def offers(
     )
     return {
         "checked_at": at,
-        "items": [dict(row) for row in items],
+        "items": [utc_values(row) for row in items],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -282,7 +286,7 @@ def sources(
     )
     return {
         "checked_at": at,
-        "items": [dict(row) for row in rows],
+        "items": [utc_values(row) for row in rows],
         "total": total,
         "limit": limit,
         "offset": offset,

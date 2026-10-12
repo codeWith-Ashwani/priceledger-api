@@ -213,3 +213,38 @@ class ComparisonLease(Base):
     product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
     token: Mapped[str] = mapped_column(String(36))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class OfferReport(Base):
+    __tablename__ = "offer_reports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open', 'in_review', 'resolved', 'dismissed')", name="report_status"
+        ),
+        CheckConstraint("revision >= 1", name="report_revision"),
+        Index("ix_offer_reports_status_created", "status", "created_at", "id"),
+        Index("ix_offer_reports_offer_created", "offer_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(36), unique=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"))
+    reason: Mapped[str] = mapped_column(String(40))
+    details: Mapped[str] = mapped_column(String(1000))
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReportEvent(Base):
+    __tablename__ = "report_events"
+    __table_args__ = (UniqueConstraint("report_id", "revision"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[str] = mapped_column(ForeignKey("offer_reports.id"))
+    revision: Mapped[int] = mapped_column(Integer)
+    from_status: Mapped[str | None] = mapped_column(String(20))
+    to_status: Mapped[str] = mapped_column(String(20))
+    note: Mapped[str] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

@@ -54,6 +54,7 @@ def test_empty_overview_and_read_only_unscheduled_gap(client, db, owner):
     row = client.get("/api/v1/admin/collection/offers?status=gap", headers=owner).json()["items"][0]
     assert row["last_evidence_at"] is None
     assert row["job_status"] is None
+    assert row["current_observed_at"].endswith("+00:00")
     assert all(row[key] is False for key in ("failed", "due", "running", "paused", "lease_expired"))
     assert db.scalar(select(func.count()).select_from(CollectionJob)) == 0
     db.get(Source, "test").kind = "merchant"

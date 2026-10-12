@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     lookup_requests_per_minute: int = Field(default=12, ge=1, le=1000)
     read_requests_per_minute: int = Field(default=120, ge=1, le=10_000)
     admin_requests_per_minute: int = Field(default=60, ge=1, le=1000)
+    report_requests_per_minute: int = Field(default=5, ge=1, le=60)
     request_body_bytes: int = Field(default=1_500_000, ge=4096, le=5_000_000)
     request_body_timeout_seconds: int = Field(default=15, ge=1, le=60)
     comparison_lease_seconds: int = Field(default=600, ge=300, le=1800)

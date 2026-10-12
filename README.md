@@ -75,6 +75,7 @@ All paths below use `/api/v1`. URL-encode IDs in paths.
 | `GET /categories` | Stored real-product categories |
 | `GET /health`, `GET /ready` | Liveness and migration-aware readiness |
 | `POST /ingest` | Authenticated same-source evidence ingestion |
+| `POST /reports` | Submit an issue against a displayed offer and comparison context |
 
 History/insights accept 1–36,500 days and `basis=item` or `basis=delivered`. Coverage aggregates evidence in SQL and fetches collection state in bulk. An indexed SQL query selects the latest permitted completed attempt per offer; running, future-started and revoked-source attempts are excluded.
 
@@ -116,6 +117,7 @@ Settings use the `PRICELEDGER_` prefix. Origins and retailer lists use JSON arra
 | `LOOKUP_REQUESTS_PER_MINUTE` | 12 | Separate lookup/comparison client quota buckets |
 | `READ_REQUESTS_PER_MINUTE` | 120 | Public data-read quota |
 | `ADMIN_REQUESTS_PER_MINUTE` | 60 | Authenticated administration quota |
+| `REPORT_REQUESTS_PER_MINUTE` | 5 | Separate public report quota, range 1–60 |
 | `MAX_HISTORY_OBSERVATIONS` | 10,000 | Global evidence ceiling per request/calculation |
 | `COLLECTION_DAILY_BUDGET` | 500 | Reserved operations per source/UTC day |
 | `COLLECTION_COOLDOWN_HOURS` | 6 | Source retry cooldown |
@@ -140,12 +142,23 @@ Set a server-only `PRICELEDGER_ADMIN_TOKEN`. Administrative requests require `X-
 | `GET /admin/collection/overview` | Recorded collection counters and completed checks in the last 24 hours |
 | `GET /admin/collection/offers?status=all&limit=25&offset=0` | Paginated tracked-offer health and scheduling constraints |
 | `GET /admin/collection/sources?limit=25&offset=0` | Paginated source access, cooldowns, daily budgets and check outcomes |
+| `GET /admin/reports?status=open&limit=25&offset=0` | Private issue queue, optionally filtered by review status |
+| `GET /admin/reports/{id}?limit=25&offset=0` | Captured evidence, issue details and paginated review audit |
+| `POST /admin/reports/{id}/review` | Update review status with an expected revision and private note |
 
 Collection health is read-only: it neither contacts retailers nor starts jobs. Offer filters include `stale`, `failed`, `gap`, `due`, `paused`, `unscheduled` and `inactive`; pages accept 1–100 records. Missing/future-dated or older-than-`FRESHNESS_HOURS` quotes count as stale. A gap means no approved, past listing-price observation within `HISTORY_GAP_HOURS`; an unpriced identity check cannot close it. Due counts follow worker scheduling, source permissions, UTC daily budgets and cooldowns; leased jobs do not prove a worker process is alive. Source diagnostics include search failures even when no offer was created. Indexed latest-record queries and SQL aggregates avoid loading observation history or issuing one query per displayed offer.
 
 Imports accept UTF-8 CSV or JSON arrays, at most 1 MB and 1,000 records. Each row identifies an existing exact offer, retailer listing, typed variant attributes, seller/condition/region, unique source event, aware past timestamp, stock and evidence reference. Prices are integer paise; only INR listing prices are accepted. Unknown shipping remains empty/null. Download an identity template with blank evidence fields from the owner UI.
 
 Invalid rows block staging. Drafts expire after 24 hours. Commit rechecks permissions, identity and event conflicts and writes atomically. Archive imports retain original context, mappings, file hashes and audit references; they never overwrite current live quotes. Source registration records operator approval, not independently verified rights. No historical provider is connected automatically.
+
+## Offer issue reporting
+
+Public reporting accepts `wrong_price`, `wrong_product`, `outdated_price`, `stock_status` and `broken_link`. Send a UUID4 `request_id`, `offer_id`, `comparison_product_id`, 5–1,000 characters of `details`, and the displayed `observed_at`, `item_paise` and `in_stock`. Prices use strict integer paise; nullable price/time fields must still be present. The offer and comparison anchor must have approved non-demo source evidence. A changed quote returns 409; refresh the product before reporting again.
+
+The server captures its own offer, source, seller, variant and comparison snapshot. Reports preserve the quoted evidence even if the listing changes. Retrying the same identifier and normalized payload returns the original receipt (200); new reports return 201. Reusing an identifier with different details returns 409. Public responses contain only a receipt, with no public report lookup or private notes. Avoid personal/payment information in free text. Intake consumes its separate persisted client quota and never fetches retailers.
+
+Owner review statuses are `open`, `in_review`, `resolved` and `dismissed`; queue and audit pages accept 1–100 records. Reviews require `expected_revision`, `status` and an optional private `note` of up to 1,000 characters. Resolving/dismissing requires an explanation of at least five characters. Concurrent edits return 409; reload before retrying. Each change appends an audit event atomically with its revision. Reviewing a report does not modify prices, observations, matches or collection jobs. Verify and correct underlying evidence separately. Anonymous reports have no outbound notifications or user accounts.
 
 ## Safeguards
 
@@ -166,7 +179,7 @@ uv run pytest -q
 uv run alembic check
 ```
 
-Unit tests use isolated databases and controlled source responses. Fixtures never seed the application. CI also verifies PostgreSQL migrations, concurrency, leases, backfills and streamed matching. For local PostgreSQL checks, configure a **disposable** PostgreSQL database, migrate it and run `uv run pytest -q tests/test_postgres.py`. Do not use the application database: integration tests create test records.
+Unit tests use isolated databases and controlled source responses. Fixtures never seed the application. CI also verifies PostgreSQL migrations, concurrency, leases, backfills, streamed matching and report/review races. For local PostgreSQL checks, configure a **disposable** PostgreSQL database, migrate it and run `uv run pytest -q tests/test_postgres.py tests/test_report_concurrency.py`. Do not use the application database: integration tests create test records.
 
 Frontend browser checks combine intercepted contracts with genuine previously looked-up listings. Large suites use a separate database and temporary quota overrides, not reset application budgets/cooldowns.
 
@@ -179,6 +192,7 @@ Frontend browser checks combine intercepted contracts with genuine previously lo
 | `collection`, `coordination`, `worker` | Durable budgets, leases and refresh jobs |
 | `ingestion`, `history_imports` | Validated observations and reviewed archives |
 | `operations` | Authenticated read-only collection health and paginated diagnostics |
+| `reports` | Public issue receipts, immutable evidence snapshots and private review audits |
 | `http_safety`, `limits`, `auth` | Request safeguards and administrative access |
 
 Both repositories remain private. README is the only repository documentation; research, sprint notes and QA artifacts remain local. Databases, credentials, environments and generated output are ignored by Git.

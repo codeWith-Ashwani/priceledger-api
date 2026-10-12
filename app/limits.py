@@ -67,6 +67,10 @@ def read_limit(request: Request, db: Session = Depends(get_db)):
     reserve_client(db, request_client(request), "read", get_settings().read_requests_per_minute)
 
 
+def report_limit(request: Request, db: Session = Depends(get_db)):
+    reserve_client(db, request_client(request), "report", get_settings().report_requests_per_minute)
+
+
 def admin_limit(request: Request, db: Session):
     reserve_client(db, request_client(request), "admin", get_settings().admin_requests_per_minute)
 

@@ -48,4 +48,4 @@ jobs:
       - run: uv sync --locked
       - run: uv run alembic upgrade head
       - run: uv run alembic check
-      - run: uv run pytest -q tests/test_postgres.py
+      - run: uv run pytest -q tests/test_postgres.py tests/test_report_concurrency.py
