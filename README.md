@@ -66,6 +66,7 @@ All paths below use `/api/v1`. URL-encode IDs in paths.
 | --- | --- |
 | `POST /lookup` | Resolve a URL or search brand/model |
 | `POST /products/{id}/compare` | Scan connected stores and return offers/diagnostics |
+| `POST /product-comparison` | Read independent exact-variant offers for 2–4 selected products |
 | `GET /products?q=&category=&limit=24&offset=0` | Paginated real catalog |
 | `GET /products/{id}` | Exact-variant offers and metadata |
 | `GET /products/{id}/history?days=90&basis=item` | Source-separated dated timeline |
@@ -78,6 +79,12 @@ All paths below use `/api/v1`. URL-encode IDs in paths.
 | `POST /reports` | Submit an issue against a displayed offer and comparison context |
 
 History/insights accept 1–36,500 days and `basis=item` or `basis=delivered`. Coverage aggregates evidence in SQL and fetches collection state in bulk. An indexed SQL query selects the latest permitted completed attempt per offer; running, future-started and revoked-source attempts are excluded.
+
+## Side-by-side product comparison
+
+`POST /api/v1/product-comparison` accepts `{"product_ids":["first-recorded-id","second-recorded-id"]}` with 2–4 distinct recorded product IDs. It returns columns in selection order, recorded product attributes, all permitted exact-variant offers per selection and a read timestamp. Each anchor requires its own approved non-demo offer. Missing/revoked selections return 404 for the whole request; selecting two members of the same exact-variant group returns 409. Remove that selection and retry. Duplicate IDs, extra fields and invalid sizes return 422.
+
+This endpoint reads the database using the public read quota. It does not contact retailers, reserve collection budgets, create matches, save a comparison list or merge histories. Exact-group offer parameters are batched without a result/store cap. Store quotes retain their source, seller, condition, fees, rating and observation time; a read timestamp is not a new store check. Missing attributes remain missing. Stored variant details can originate in retailer metadata/title parsing and are not independently verified technical specifications. The frontend ranks fresh available online prices separately within each column, with no overall best-product claim.
 
 ## Collection and maintenance
 
@@ -193,6 +200,7 @@ Frontend browser checks combine intercepted contracts with genuine previously lo
 | `ingestion`, `history_imports` | Validated observations and reviewed archives |
 | `operations` | Authenticated read-only collection health and paginated diagnostics |
 | `reports` | Public issue receipts, immutable evidence snapshots and private review audits |
+| `product_comparison` | Bounded selection reads with independent exact-variant offers and source permissions |
 | `http_safety`, `limits`, `auth` | Request safeguards and administrative access |
 
 Both repositories remain private. README is the only repository documentation; research, sprint notes and QA artifacts remain local. Databases, credentials, environments and generated output are ignored by Git.
