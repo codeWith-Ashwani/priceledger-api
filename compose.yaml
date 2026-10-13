@@ -48,7 +48,11 @@ services:
     <<: *api
     command: [python, -m, app.worker, --interval-minutes, "15", --max-jobs, "10"]
     healthcheck:
-      disable: true
+      test: [CMD, python, -m, app.healthcheck]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     depends_on:
       api:
         condition: service_healthy
