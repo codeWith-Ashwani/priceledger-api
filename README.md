@@ -6,6 +6,37 @@ Backend for comparing real product prices in India and maintaining a dated, sour
 
 **Release 1.0.0:** feature scope is frozen. This release consolidates the existing lookup, matching, comparison, recorded history, targets, owner tools, issue review and documented local-shop evidence. Both repositories remain private. Coverage depends on readable, permitted sources; a release version does not imply universal store coverage or complete launch history.
 
+## At a glance
+
+| Capability | What the backend provides |
+| --- | --- |
+| Product lookup | Resolve public product URLs or search by brand/model |
+| Store comparison | Verify readable offers, label variant differences and retain store diagnostics |
+| Price history | Persist dated observations with source, stock, fees and exact-variant context |
+| Recorded insights | Show observed price milestones and coverage; withhold assessments when evidence is insufficient |
+| Collection | Refresh eligible tracked listings with durable jobs, leases, budgets and cooldowns |
+| Historical imports | Preview and review permitted exact-variant archive records before committing |
+| Local shop quotes | Publish reviewed city-specific evidence; require two eligible shops for a sampled range |
+| Owner tools | Review reported issues, source permissions, collection health and audit records |
+
+**Navigate:** [Quick start](#quick-start) · [Architecture](#architecture) · [Lookup](#lookup-and-comparison) · [API reference](#api-reference) · [Configuration](#configuration) · [Release setup](#reproducible-release-setup) · [Troubleshooting](#troubleshooting) · [Verification](#development-and-verification)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser[React frontend] --> API[FastAPI]
+    API --> Policy[URL safety, source permissions and budgets]
+    Policy --> Stores[Retailer adapters]
+    API --> DB[(PostgreSQL / local SQLite)]
+    Worker[Scheduled collector] --> Policy
+    Worker --> DB
+    DB --> Evidence[Source-attributed prices and history]
+    Evidence --> API
+```
+
+Lookup and collection fetch public evidence through the same network-safety and source-budget controls. Matching keeps exact variants separate from same-model alternatives. The database retains observations rather than reconstructing missing dates. Read-only history and analysis endpoints use stored, permitted evidence. The packaged Nginx frontend proxies browser API calls on the same origin; local Vite development talks to port 8000 directly.
+
 ## Quick start
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/getting-started/installation/). From this repository:
@@ -17,6 +48,8 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 A fresh installation starts with an empty catalog in `priceledger.db`; there is no sample seed. Apply migrations before starting the API or workers. Environment variables and an optional `.env` configure the service; `.env.example` lists operational settings. Restart processes after configuration changes. For PostgreSQL, set `PRICELEDGER_DATABASE_URL` to your `postgresql+psycopg://` connection string before migrating. Keep credentials out of Git.
+
+Keep this terminal running. In a **second terminal**, open the sibling `priceledger-web` repository, install Node.js 22.12+ dependencies with `npm ci`, and run `npm run dev`. Open `http://127.0.0.1:5173`. Starting the frontend alone does not start the API; closing the API terminal stops local lookups. Run the collector in another terminal when scheduled price updates are wanted.
 
 | Local URL | Purpose |
 | --- | --- |
@@ -247,6 +280,27 @@ docker compose --env-file .env.compose exec -T db pg_restore -U priceledger --ex
 Verify the restored migration revision, product/observation counts, permissions, private audit records and a selection of genuine histories in an isolated API deployment before switching the database connection. CI exercises fresh-schema dump/restore and migration consistency; it cannot establish recoverability of your actual retained evidence. Protect and back up `.env.compose` separately.
 
 For upgrades, back up first, stop web/API/worker, check out the selected matching tags, then rebuild with `docker compose --env-file .env.compose --profile web up --build --force-recreate -d --wait`. Recreating web refreshes its upstream connection. Check readiness, run the release smoke and inspect collection health. If rollback is required after a schema-changing upgrade, restore the pre-upgrade backup to a separate database and run the matching application tag; do not blindly downgrade a populated database. Release 1.0.0 keeps migration head `9c0ff0799756` unchanged from the previous phase.
+
+## Troubleshooting
+
+| Symptom | Check or action |
+| --- | --- |
+| Frontend loads but lookup fails with a network error | Keep the API and frontend running in separate terminals. Check the API origin in the frontend's `VITE_API_BASE_URL`; the default is `http://127.0.0.1:8000/api/v1`. |
+| Health is reachable but readiness returns 503 | Read the readiness message, check the configured database, and run `uv run alembic upgrade head` against that database. Preserve existing data. |
+| Browser reports a CORS error | Add the actual frontend origin to `PRICELEDGER_CORS_ORIGINS` as a JSON array and restart the API. `localhost` and `127.0.0.1` are different origins. |
+| Only one store appears | Read the comparison diagnostics. Other stores can be blocked, cooling down, unreadable or unverified; accessories are not equivalent products. |
+| A chart has only one point or gaps | Only genuine observations are available. Keep a collector running for future eligible checks or review permitted historical imports. |
+| An owner request returns 401/403 | Owner operations require a configured server-side token and the matching `X-Admin-Token`; an empty configuration disables them. |
+| A lookup returns 429 or a source cooldown | Wait for the stated retry window. Do not clear quotas or bypass source access restrictions. |
+| A collector is healthy but prices remain old | Health checks confirm database/migration readiness. Inspect recorded attempt outcomes, due jobs, source budgets and timestamps in the owner workspace. |
+
+From this API directory, check the running service without contacting retailers:
+
+```sh
+uv run python scripts/release_smoke.py
+```
+
+The script checks health, migration readiness, a catalog read, API version and anonymous owner-access rejection. Pass an alternative origin as its argument if using a different port. It does not seed products or collect new prices.
 
 ## Development and verification
 
